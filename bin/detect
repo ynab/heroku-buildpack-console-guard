@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Always apply this buildpack
+echo "console-guard"
+exit 0

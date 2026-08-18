@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Usage: bin/compile BUILD_DIR CACHE_DIR ENV_DIR
+BUILD_DIR=$1
+BUILDPACK_DIR=$(cd "$(dirname "$0")/.." && pwd)
+
+echo "-----> Installing console guard profile script"
+mkdir -p "$BUILD_DIR/.profile.d"
+# Named zzz_ so it loads last, after every other buildpack's profile script.
+# CONSOLE_AUDIT_ENABLED must be the final exported value, and the gate must not
+# be bypassable by a later script.
+cp "$BUILDPACK_DIR/profile/console_guard.sh" "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
+echo "       Done."
