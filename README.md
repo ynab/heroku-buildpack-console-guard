@@ -343,10 +343,13 @@ The Heroku Postgres CLI commands — `heroku pg:psql`, `heroku pg:pull`, `heroku
 also outside the gate. They apply only to a Heroku-attached database; on an app whose database is
 hosted elsewhere they simply error.
 
-**`heroku ps:exec` bypasses the gate.** It opens a shell on an already-running web or worker dyno.
-The profile script does not enforce policy there, so `CONSOLE_AUDIT_ENABLED` is never exported; and
-because no dyno is created, Heroku emits no `api:dyno` webhook either. Disable `runtime-heroku-exec`
-to close this.
+**`heroku ps:exec` bypasses the gate.** It opens an SSH shell on an already-running web or worker
+dyno, which never goes through the one-off login shell. The profile script does not enforce policy
+there, so `CONSOLE_AUDIT_ENABLED` is never exported; and because no dyno is created, Heroku emits no
+`api:dyno` webhook either. Disabling `runtime-heroku-exec` is necessary but not sufficient:
+`ps:exec` re-enables the feature on demand (with a dyno restart) for any caller who can manage the
+app's features, then connects anyway. The only durable control is access-level — limit who can run
+it — plus Heroku's own audit of exec sessions. See [Also recommended on the app](#also-recommended-on-the-app).
 
 **Heroku Scheduler and release-phase commands are audited but not gated.** They run arbitrary app
 commands on one-off dynos with no `CONSOLE_USER` or `CONSOLE_REASON`, and Scheduler entries are
@@ -368,10 +371,21 @@ reach models or the database.
 **Statements executed after the audit path is disabled are not recorded.** A statement that disables
 auditing is itself recorded if the gem logs before execution, but statements after it are not.
 
-**If `heroku run -e` can override `HOME`, the gate does not run at all**, because `$HOME/.profile.d`
-would never be sourced. No in-dyno script can close that; it needs to be confirmed against the
-platform. The same applies to any future change in how Heroku invokes one-off commands: the gate
-depends on the command arriving through a login shell whose `argv` is `bash -c <command>`.
+**A pre-existing file plus `-e BASH_ENV` reaches a shell before the gate.** Bash sources `$BASH_ENV`
+at the start of every non-interactive shell — including the login shell that loads the guard, which
+runs it *before* `.profile`, so no in-dyno code runs earlier to stop it. Exploiting it needs a file
+already on disk with useful contents: dyno filesystems are ephemeral and per-run, so the file must
+ship in the slug or base image, which means deploy access — and anyone who can deploy can already
+edit the app or drop the buildpack. It is therefore the same trust boundary as the rest of this
+section: the guard assumes the deployed slug is trusted and gates runtime operator commands, not the
+code. The profile unsets `EDITOR`/`VISUAL` for the same class of reason but cannot unset `BASH_ENV`
+early enough to matter.
+
+**`heroku run -e` cannot override `HOME` to skip the gate.** Confirmed against the platform:
+`-e HOME=/tmp` still reaches the profile script and is denied, so Heroku sources `.profile.d`
+regardless of an operator-supplied `HOME`. The gate does still depend on the command arriving through
+a login shell whose `argv` is `bash -c <command>`; a future change in how Heroku invokes one-off
+commands could break that assumption.
 
 ## License
 
