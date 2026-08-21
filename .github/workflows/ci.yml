@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  # This buildpack sits in the production build path of every app that uses it,
+  # so run on a schedule too: a shellcheck release can turn a pass into a fail
+  # without anyone touching the repo.
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      # Files are discovered rather than listed, so splitting a script into
+      # several files cannot silently drop it from the lint.
+      - name: shellcheck
+        run: |
+          shellcheck --version
+
+          files=$(git ls-files | while read -r f; do
+            if [ "${f##*.}" = "sh" ] || head -n 1 "$f" | grep -qE '^#!.*(bash|sh)( |$)'; then
+              printf '%s\n' "$f"
+            fi
+          done)
+
+          if [ -z "$files" ]; then
+            echo "shellcheck: no shell files discovered, so this job proves nothing" >&2
+            exit 1
+          fi
+
+          echo "$files" | sed 's/^/linting /'
+
+          # -s bash because the .profile.d fragment is sourced and so carries no
+          # shebang, and bash is what Heroku's login shell is.
+          # shellcheck disable=SC2086
+          shellcheck -s bash $files
