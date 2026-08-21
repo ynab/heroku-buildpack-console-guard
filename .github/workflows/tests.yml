@@ -9,29 +9,20 @@ permissions:
   contents: read
 
 jobs:
-  tests:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    steps:
-      - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
-      - name: bash version
-        run: bash --version
-      - name: End-to-end tests
-        run: ./test/run_tests.sh
-
-  # The guard runs on the Heroku stack image, not on ubuntu-latest. Running the
-  # suite inside the stack image catches anything that depends on the platform's
-  # bash or coreutils.
+  # The guard only ever runs on a Heroku stack image, so that is the only place
+  # worth testing it: the suite runs inside every supported stack, and nowhere
+  # else. heroku-22 is deprecated but supported through April 2027.
   tests-heroku-stack:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
-        stack: ["heroku/heroku:22", "heroku/heroku:24"]
+        stack: ["heroku/heroku:22", "heroku/heroku:24", "heroku/heroku:26"]
     container:
       image: ${{ matrix.stack }}
-      # heroku/heroku:24 defaults to a non-root user, which cannot write the
-      # runner's workspace, so actions/checkout dies with EACCES before the
-      # suite runs.
+      # heroku/heroku:24 and :26 default to a non-root user, which cannot write
+      # the runner's workspace, so checkout dies with EACCES before the suite
+      # runs.
       options: --user root
     steps:
       - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
