@@ -1,8 +1,11 @@
 name: CI
 
 on:
+  # Limited to main on purpose. A commit on a branch with an open PR is already
+  # covered by the pull_request trigger, and matching "**" here made both fire
+  # on the same commit, so every check ran twice.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   # This buildpack sits in the production build path of every app that uses it,
   # so run on a schedule too: a shellcheck release can turn a pass into a fail
