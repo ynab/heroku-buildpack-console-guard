@@ -190,13 +190,19 @@ records the installed version:
    heroku labs:enable runtime-dyno-metadata -a app_name
    ```
 
-2. **Disable `runtime-heroku-exec`.** `heroku ps:exec` opens a shell on an already-running dyno,
-   bypassing this buildpack entirely. The feature is per-app and enabled by default on new apps.
+2. **Restrict who can run `heroku ps:exec`.** It opens an SSH shell on an already-running dyno, which
+   never goes through the one-off `heroku run` login shell — so this buildpack is not in the loop and
+   cannot gate or audit it.
 
    ```
-   heroku features -a app_name                              # runtime-heroku-exec should be off
-   heroku features:disable runtime-heroku-exec -a app_name   # if it is on
+   heroku features:disable runtime-heroku-exec -a app_name   # necessary but NOT sufficient
    ```
+
+   Disabling the feature is not a durable control: `heroku ps:exec` re-enables it on demand (with a
+   dyno restart) for any caller who can manage the app's features, and then connects anyway. The only
+   real controls are access-level — limit who holds deploy/operate access on the app (Heroku
+   Enterprise Teams, Private Spaces roles) — and rely on Heroku's own audit trail of exec sessions.
+   Treat `ps:exec` as an ungated channel that must be governed outside this buildpack.
 
 ## Companion gem
 
