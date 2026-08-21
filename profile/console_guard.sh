@@ -63,9 +63,16 @@ if [[ -r "$_cg_metadata_file" ]]; then
   # Minimal, dependency-free extraction of "name" and "id" from the metadata
   # JSON. Anything unparseable is treated as absent rather than as an error, so a
   # change in the file's shape degrades to the $DYNO fallback below.
-  _cg_meta_name="$(printf '%s' "$_cg_meta_raw" |
+  #
+  # The file carries several objects, each with its own "name"/"id" (dyno, app,
+  # release). Narrow to the "dyno" object first: a greedy match over the whole
+  # file picks the LAST "name", which is app.name (empty), silently defeating the
+  # spoof check. The dyno object has no nested braces, so [^}] delimits it.
+  _cg_meta_dyno="$(printf '%s' "$_cg_meta_raw" |
+    sed -n 's/.*"dyno"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p')"
+  _cg_meta_name="$(printf '%s' "$_cg_meta_dyno" |
     sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-  _cg_meta_id="$(printf '%s' "$_cg_meta_raw" |
+  _cg_meta_id="$(printf '%s' "$_cg_meta_dyno" |
     sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
   if [[ -n "$_cg_meta_name" ]]; then
@@ -88,7 +95,7 @@ if [[ -r "$_cg_metadata_file" ]]; then
     _cg_dyno_name="$_cg_meta_name"
     [[ -n "$_cg_meta_id" ]] && _cg_dyno_id="$_cg_meta_id"
   fi
-  unset _cg_meta_raw _cg_meta_name _cg_meta_id
+  unset _cg_meta_raw _cg_meta_dyno _cg_meta_name _cg_meta_id
 fi
 
 # ---------- decide what applies to this dyno ----------

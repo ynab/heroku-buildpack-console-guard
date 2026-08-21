@@ -172,7 +172,10 @@ assert_output 'denials name the guard version' 'bash' 'console-guard '
 # ============================================================ dyno metadata
 cg_section "regression (finding 4): \$DYNO cannot be spoofed when metadata exists"
 cg_build metadata CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/metadata/dyno-metadata.json"
-cg_write_metadata '{"dyno":{"id":"9f1e-uuid","name":"run.1234"}}'
+# The real /etc/heroku/dyno shape: three objects, each with its own name/id, and
+# app.name empty. A greedy parser reads app.name (empty) instead of dyno.name and
+# silently falls back to trusting $DYNO -- the finding-4 hole, reopened.
+cg_write_metadata '{"dyno":{"id":"de7c25da-uuid","name":"run.1234"},"app":{"id":"0d276459-uuid","name":""},"release":{"id":117,"commit":"9eb6f0d7","description":"Deploy 9eb6f0d7"}}'
 assert_ran 'rails c'
 assert_no_output 'no metadata warning when metadata is present' 'rails c' 'dyno metadata is not enabled'
 # The operator claims to be on a web dyno to skip the gate; the file disagrees.
@@ -199,7 +202,7 @@ assert_ran 'rake db:drop'
 cg_env 'CONSOLE_USER=' ; assert_output 'missing identification warns and permits' \
   'rails c' 'WILL BE BLOCKED'
 # ...but tampering with the dyno name is still fatal in permit mode.
-cg_write_metadata '{"dyno":{"id":"uuid","name":"run.1234"}}'
+cg_write_metadata '{"dyno":{"id":"uuid","name":"run.1234"},"app":{"id":"aid","name":""},"release":{"id":117}}'
 cg_env 'DYNO=web.1' ; assert_blocked 'bash' 'does not match this dyno'
 cg_env_sticky
 
