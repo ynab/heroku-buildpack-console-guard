@@ -101,14 +101,15 @@ rejected for the same reason — `PATH=/app/bin rails c` would take the wrapper 
 | `rails runner -` (a bare `-` in any argument position) | Reads the program from **stdin**, so the executed code appears neither in the dyno command string nor in an `ARGV` capture inside the app. The session still produces a complete record with a correct user, reason and dyno UUID, while the code that ran is unrecorded |
 | `rails runner --file <f>`, or any `runner` argument that exists on disk | Same shape — the command string names a file rather than the code that runs |
 | `-c` in any argument position | Reaches a shell (`bash -c`). No legitimate `rails`/`rake` invocation uses it. `rails c` — the console shorthand — is unaffected, because that argument is `c`, not `-c` |
-| `db:drop`, `db:reset`, `db:setup`, `db:schema:load`, `db:migrate:reset`, `db:migrate:down`, `db:migrate:redo`, `db:rollback`, `db:truncate_all`, `db:purge` (and `:all` variants), in either the `rake` or `rails` spelling | Destructive. `db:setup` is on the list because it runs `db:schema:load` |
 
 Because these are checked after expansion, the quoted, variable and glob spellings of each are
-blocked too: `rails "dbconsole"`, `rake "db:drop"`, `rails runner "-"` and `rails runner *.r?` are
-all rejected.
+blocked too: `rails "dbconsole"`, `rails "credentials:edit"`, `rails runner "-"` and
+`rails runner *.r?` are all rejected.
 
-`db:seed` is **not** on the list: seeding is destructive in some apps and routine in others. If your
-seeds overwrite production data, add it to `_cg_denied_tasks` in `guard/shim.sh`.
+Destructive `db:*` tasks — `db:drop`, `db:reset`, `db:rollback` and the rest — are **not** blocked
+here. This guard is about making sure what runs is logged, not about preventing damage, and blocking
+them impedes on-call. They still reach an `api:dyno` webhook, and the app is the right place for a
+task-level guard.
 
 The `runner` file check tests whether the argument **exists on disk**, which is the same decision
 Rails itself makes. There is no heuristic on how the argument looks, so

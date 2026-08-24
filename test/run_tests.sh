@@ -31,6 +31,12 @@ assert_ran 'rails runner Model.some_method' 'rails runner Model.some_method'
 assert_ran "rails runner 'Model.some_method(1, 2)'" 'rails runner Model.some_method(1, 2)'
 assert_ran 'rails db:migrate'               'rails db:migrate'
 assert_ran 'rake db:migrate'                'rake db:migrate'
+# Destructive db tasks are deliberately not gated here: the api:dyno webhook
+# records them and the app's own production guard covers the rest.
+assert_ran 'rake db:drop'                   'rake db:drop'
+assert_ran 'rails db:migrate:reset'         'rails db:migrate:reset'
+assert_ran 'rake db:rollback STEP=99'       'rake db:rollback STEP=99'
+assert_ran 'rake db:seed'
 assert_ran 'rake -T'                        'rake -T'
 assert_ran 'rails runner -e production Model.foo'
 
@@ -76,9 +82,9 @@ assert_blocked 'rails "dbconsole"'              'not permitted'
 assert_blocked "rails 'dbconsole'"              'not permitted'
 assert_blocked 'rails db""console'              'not permitted'
 assert_blocked 'rails ""dbconsole'              'not permitted'
-assert_blocked 'rake "db:drop"'                 'destructive'
-assert_blocked 'rake db:dr"op"'                 'destructive'
-assert_blocked "rake 'db:drop'"                 'destructive'
+assert_blocked 'rails "credentials:edit"'       'editor'
+assert_blocked 'rails credentials:ed"it"'       'editor'
+assert_blocked "rails 'credentials:edit'"       'editor'
 assert_blocked 'rails runner "-"'               'stdin'
 assert_blocked "rails runner '-'"               'stdin'
 assert_blocked 'rails runner -""'               'stdin'
@@ -91,7 +97,7 @@ cg_env 'P=-'                    ; assert_blocked 'rails runner $P'      'stdin'
 cg_env 'P=-'                    ; assert_blocked 'rails runner "$P"'    'stdin'
 cg_env 'P=-'                    ; assert_blocked 'rails runner ${P}'    'stdin'
 cg_env 'F=script.rb'            ; assert_blocked 'rails runner $F'      'exists on disk'
-cg_env 'T=db:drop'              ; assert_blocked 'rake $T'              'destructive'
+cg_env 'T=credentials:edit'     ; assert_blocked 'rails $T'            'editor'
 cg_env 'S=dbconsole'            ; assert_blocked 'rails $S'             'not permitted'
 
 cg_section "regression (finding 2): pathname expansion must not defeat policy"
@@ -105,7 +111,7 @@ assert_blocked 'rails runner $HOME/script.rb' 'exists on disk'
 # wrapper sees the expanded argv, so it needs no rule of its own.
 assert_blocked 'rails runner {-,foo}'   'stdin'
 assert_blocked 'rails {db,dbconsole}'   'not permitted'
-assert_blocked 'rake {db:drop,x}'       'destructive'
+assert_blocked 'rails {credentials:edit,x}' 'editor'
 # The file test now matches what Rails itself does, so a name that does not exist
 # on disk is inline code and is allowed -- the old heuristic blocked it.
 assert_ran "rails runner 'Model.where(x: 1).rb'"
@@ -118,19 +124,6 @@ cg_env 'CONSOLE_BLOCK_ENFORCE=0'     ; assert_blocked 'bash'
 cg_env 'CONSOLE_BLOCK_ENFORCE='      ; assert_blocked 'bash'
 cg_env 'CONSOLE_BLOCK_ENFORCE=False' ; assert_blocked 'bash'
 cg_env 'CONSOLE_BLOCK_ENFORCE=true'  ; assert_blocked 'bash'
-
-cg_section "regression (finding 5): destructive tasks"
-for _task in db:drop db:reset db:setup db:schema:load db:migrate:reset \
-             db:migrate:down db:migrate:redo db:rollback db:truncate_all \
-             db:purge db:drop:all db:schema:load:all; do
-  assert_blocked "rake $_task" 'destructive'
-  assert_blocked "rails $_task" 'destructive'
-done
-assert_blocked 'rake db:migrate db:drop'    'destructive'
-assert_blocked 'rake db:rollback STEP=99'   'destructive'
-# Not on the list, and documented as such.
-assert_ran 'rake db:seed'
-assert_ran 'rake db:version'
 
 cg_section "regression (finding 6): editor-based shell escapes"
 assert_blocked 'rails credentials:edit'          'editor'
@@ -198,7 +191,7 @@ assert_output 'profile check warns and permits' 'bash' 'WILL BE BLOCKED'
 assert_output 'wrapper check warns and permits' 'rails "dbconsole"' 'WILL BE BLOCKED'
 assert_ran 'rails "dbconsole"'
 assert_ran 'rails runner "-"'
-assert_ran 'rake db:drop'
+assert_ran 'rails credentials:edit'
 cg_env 'CONSOLE_USER=' ; assert_output 'missing identification warns and permits' \
   'rails c' 'WILL BE BLOCKED'
 # ...but tampering with the dyno name is still fatal in permit mode.

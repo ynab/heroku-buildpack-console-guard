@@ -123,36 +123,6 @@ case "$_cg_sub" in
     ;;
 esac
 
-# Destructive database tasks, in both the rake and rails spellings.
-#
-# db:setup is here because it runs db:schema:load, which is destructive on an
-# existing database -- it is db:reset in all but name.
-#
-# db:seed is deliberately NOT here: seeding is destructive in some apps and
-# routine in others. Add it if your seeds overwrite production data.
-_cg_denied_tasks=(
-  db:drop
-  db:migrate:down
-  db:migrate:redo
-  db:migrate:reset
-  db:purge
-  db:reset
-  db:rollback
-  db:schema:load
-  db:setup
-  db:truncate_all
-)
-
-_cg_task_denied() {
-  local candidate="$1" denied
-  # Accept the `:all` multi-database suffix on any of the above.
-  candidate="${candidate%:all}"
-  for denied in "${_cg_denied_tasks[@]}"; do
-    [[ "$candidate" == "$denied" ]] && return 0
-  done
-  return 1
-}
-
 for _cg_arg in "$@"; do
   # A bare `-` makes `rails runner` read the program from stdin, so the code
   # that runs appears in no log at all -- not the dyno command string, not the
@@ -171,12 +141,6 @@ for _cg_arg in "$@"; do
     _cg_deny "The \`-c\` flag is not permitted on one-off dynos." \
              "" \
              "Use \`rails c\` for a console."
-  fi
-
-  if _cg_task_denied "$_cg_arg"; then
-    _cg_deny "\`${_cg_arg}\` is not permitted on one-off dynos." \
-             "" \
-             "It is destructive."
   fi
 done
 
