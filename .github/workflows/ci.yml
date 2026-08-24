@@ -7,11 +7,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # This buildpack sits in the production build path of every app that uses it,
-  # so run on a schedule too: a shellcheck release can turn a pass into a fail
-  # without anyone touching the repo.
-  schedule:
-    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -22,10 +17,19 @@ jobs:
     steps:
       - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
 
+      # Pinned rather than installed from apt: Ubuntu 24.04 only carries 0.9.0.
+      # Bumping the version means bumping the checksum in the same commit.
       - name: Install shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" -o shellcheck.tar.xz
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          rm -rf shellcheck.tar.xz "shellcheck-${SHELLCHECK_VERSION}"
 
       # Files are discovered rather than listed, so splitting a script into
       # several files cannot silently drop it from the lint.
