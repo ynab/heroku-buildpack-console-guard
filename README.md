@@ -243,3 +243,7 @@ reach models or the database.
 **Statements executed after the audit path is disabled are not recorded.** A statement that
 disables auditing is itself recorded if the gem logs before execution, but statements after it are
 not.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
