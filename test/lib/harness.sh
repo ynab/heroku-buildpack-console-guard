@@ -160,6 +160,23 @@ cg_run() {
   return 0
 }
 
+# cg_run_no_dash_c <payload> -- runs the payload through a login shell whose argv
+# has no `-c`, by feeding it on stdin. This is the shape the gate cannot vet: it
+# has an argv to report but no command string in it.
+cg_run_no_dash_c() {
+  CG_OUT="$(cd "$CG_APP" && printf '%s\n' "$1" | env -i \
+    "HOME=$CG_APP" \
+    "PATH=/usr/local/bin:/usr/bin:/bin" \
+    "DYNO=run.1234" \
+    "CONSOLE_USER=becky" \
+    "CONSOLE_REASON=testing" \
+    "BASH_ENV=$CG_APP/.profile" \
+    /bin/bash --noprofile -l 2>&1)"
+  # shellcheck disable=SC2034  # available to tests that want the exit status
+  CG_STATUS=$?
+  return 0
+}
+
 # ---------------------------------------------------------------- assertions
 
 _cg_report() {

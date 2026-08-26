@@ -149,6 +149,25 @@ forms such as `bash -lc <command>`). If it cannot be read, the session is **refu
 cannot vet a command it cannot see. Likewise, if the command wrapper is not installed, the session is
 refused rather than run under half a policy.
 
+"Cannot be read" covers two distinct cases, and they get distinct messages because they have
+different fixes:
+
+| Message | Means |
+|---|---|
+| `Could not read the dyno command` | `/proc/$$/cmdline` was empty or unreadable |
+| `Could not determine the dyno command` | The login shell's argv had no `-c` payload, so it is not the `bash -c <command>` shape the gate is built on. The denial reports the argv it did see |
+
+Neither is an operator mistake, and neither is reported as a policy violation. Earlier versions
+guessed a command string from the whole argv when there was no `-c` payload, which surfaced as the
+allowlist denial naming a "command" nobody typed.
+
+### Denials echo what was parsed
+
+Every command-policy denial prints the command string the gate parsed, and the allowlist denial also
+names the first word it rejected. An operator's screenshot is then enough to tell whether the gate
+objected to the command that was typed or to something else — a wrapper, a prefix, or a shape the
+parser does not handle. Long commands are truncated at 300 characters.
+
 ## Setup
 
 Add the buildpack to a Heroku app alongside its existing buildpacks, **pinned to a commit SHA**:

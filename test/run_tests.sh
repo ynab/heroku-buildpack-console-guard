@@ -63,6 +63,35 @@ assert_blocked '/app/bin/rails c'      'must be unqualified'
 assert_blocked 'FOO=1 rails c'         'must be unqualified'
 assert_blocked 'PATH=/usr/bin rails c' 'must be unqualified'
 
+cg_section "denials report what the gate parsed"
+# A denial that does not echo the command cannot be diagnosed from an operator's
+# report: "not permitted" alone says nothing about which word was rejected, or
+# whether the gate even parsed the string that was typed.
+assert_output 'allowlist denial echoes the command' \
+  'bundle exec rails c' 'bundle exec rails c'
+assert_output 'allowlist denial names the rejected word' \
+  'bundle exec rails c' 'bundle'
+assert_output 'allowlist denial echoes a qualified path' \
+  '/app/bin/rails c' '/app/bin/rails c'
+assert_output 'compound denial echoes the command' \
+  'rails runner "1"; bash' 'rails runner "1"; bash'
+
+cg_section "a command the gate cannot read is refused as such"
+# Not the allowlist denial: there is no command string here, and reporting one
+# invented from the whole argv sends the operator hunting for a command they
+# never typed.
+cg_run_no_dash_c 'rails c'
+_cg_probe="$CG_OUT"
+assert_true 'refuses when the login shell has no -c payload' \
+  bash -c '[[ "$1" == *"Could not determine the dyno command"* ]]' _ "$_cg_probe"
+assert_true 'reports the login shell argv it did see' \
+  bash -c '[[ "$1" == *"Login shell argv:"* ]]' _ "$_cg_probe"
+assert_true 'does not report it as a disallowed command' \
+  bash -c '[[ "$1" != *"not permitted on one-off dynos"* ]]' _ "$_cg_probe"
+assert_true 'does not run the command' \
+  bash -c '[[ "$1" != *"RAN "* ]]' _ "$_cg_probe"
+unset _cg_probe
+
 cg_section "compound statements and redirections"
 assert_blocked 'rails runner "1"; bash'
 assert_blocked 'rails c && bash'

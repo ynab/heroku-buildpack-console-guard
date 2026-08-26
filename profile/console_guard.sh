@@ -191,18 +191,41 @@ if [[ -r /proc/$$/cmdline ]]; then
   done < /proc/$$/cmdline
 fi
 
+# Denials echo the command back. Without it a denial cannot be diagnosed from the
+# operator's side -- "this command is not permitted" says nothing about which
+# part of the string the gate objected to, or whether it even parsed the string
+# the operator typed.
+_cg_show() {
+  local _cg_text="$1"
+  if (( ${#_cg_text} > 300 )); then
+    printf '%s [truncated]' "${_cg_text:0:300}"
+  else
+    printf '%s' "$_cg_text"
+  fi
+}
+
 _CG_DYNO_CMD=""
-if (( ${#_cg_argv[@]} > 0 )); then
+_cg_cmd_read=false
+
+if (( ${#_cg_argv[@]} == 0 )); then
+  # Fail closed: if we cannot read the command, we cannot vet it.
+  _cg_deny "Could not read the dyno command." \
+           "" \
+           "/proc/\$\$/cmdline is empty or unreadable, and the console gate" \
+           "cannot vet a command it cannot see, so the session is refused." \
+           "" \
+           "This is a platform or build problem, not an operator mistake."
+else
   case "${_cg_argv[0]##*/}" in
     bash|sh|zsh|dash)
       _cg_i=1
       while (( _cg_i < ${#_cg_argv[@]} )); do
         # Match `-c` and also combined short forms such as `-lc`, which mean the
-        # same thing to the shell but would otherwise fall through to the
-        # whole-argv fallback below and deny every session.
+        # same thing to the shell.
         case "${_cg_argv[_cg_i]}" in
           -c|-[!-]*c)
             _CG_DYNO_CMD="${_cg_argv[_cg_i + 1]:-}"
+            _cg_cmd_read=true
             break
             ;;
         esac
@@ -210,18 +233,23 @@ if (( ${#_cg_argv[@]} > 0 )); then
       done
       ;;
   esac
-  # No `-c` payload (or a non-shell argv[0]): fall back to the whole argv.
-  if [[ -z "$_CG_DYNO_CMD" ]]; then
-    _CG_DYNO_CMD="${_cg_argv[*]}"
-  fi
-fi
 
-if [[ -z "${_CG_DYNO_CMD//[[:space:]]/}" ]]; then
-  # Fail closed: if we cannot read the command, we cannot vet it.
-  _cg_deny "Could not determine the dyno command (/proc/\$\$/cmdline unreadable)." \
-           "" \
-           "The console gate cannot vet a command it cannot read, so the" \
-           "session is refused."
+  # No `-c` payload means this is not the `bash -c <command>` shape the gate is
+  # built on: the login shell was invoked some other way, or the command arrives
+  # on stdin. There is no command string to vet, so refuse -- and say so.
+  if [[ "$_cg_cmd_read" != "true" || -z "${_CG_DYNO_CMD//[[:space:]]/}" ]]; then
+    _cg_cmd_read=false
+    _cg_deny "Could not determine the dyno command." \
+             "" \
+             "The gate expects this session's login shell to have been invoked" \
+             "as \`bash -c <command>\`. It was not, so there is no command" \
+             "string to vet and the session is refused." \
+             "" \
+             "Login shell argv:" \
+             "  $(_cg_show "${_cg_argv[*]}")" \
+             "" \
+             "This is a platform or build problem, not an operator mistake."
+  fi
 fi
 
 # ---------- block compound statements and redirections ----------
@@ -234,7 +262,8 @@ fi
 #
 # Best effort: `rails runner 'system("bash")'` contains none of these and still
 # shells out.
-if [[ "$_CG_DYNO_CMD" == *';'*   ||
+if [[ "$_cg_cmd_read" == "true" ]] &&
+   [[ "$_CG_DYNO_CMD" == *';'*   ||
       "$_CG_DYNO_CMD" == *'&'*   ||
       "$_CG_DYNO_CMD" == *'|'*   ||
       "$_CG_DYNO_CMD" == *'`'*   ||
@@ -246,6 +275,9 @@ if [[ "$_CG_DYNO_CMD" == *';'*   ||
            "dynos." \
            "" \
            "The command may not contain any of:  ;  &  |  \`  \$(  <  >  newline" \
+           "" \
+           "Command:" \
+           "  $(_cg_show "$_CG_DYNO_CMD")" \
            "" \
            "Run each command as its own \`heroku run\`."
 fi
@@ -271,22 +303,29 @@ _cg_bin="${_cg_tokens[0]:-}"
 # lookup that reaches the command wrapper, and the wrapper is where argument
 # policy is enforced. A leading `VAR=value` assignment is rejected for the same
 # reason: `PATH=/app/bin rails c` would take the wrapper out of the picture.
-case "$_cg_bin" in
-  rails|rake) : ;;
-  *)
-    _cg_deny "This command is not permitted on one-off dynos." \
-             "" \
-             "Allowed:" \
-             "  rails <task>" \
-             "  rake <task>" \
-             "" \
-             "The name must be unqualified -- \`rails\`, not \`bin/rails\` --" \
-             "and may not be preceded by a VAR=value assignment." \
-             "" \
-             "Example:" \
-             "  ${_CG_USAGE}"
-    ;;
-esac
+if [[ "$_cg_cmd_read" == "true" ]]; then
+  case "$_cg_bin" in
+    rails|rake) : ;;
+    *)
+      _cg_deny "This command is not permitted on one-off dynos." \
+               "" \
+               "Command:" \
+               "  $(_cg_show "$_CG_DYNO_CMD")" \
+               "Rejected because its first word is:" \
+               "  $(_cg_show "$_cg_bin")" \
+               "" \
+               "Allowed:" \
+               "  rails <task>" \
+               "  rake <task>" \
+               "" \
+               "The name must be unqualified -- \`rails\`, not \`bin/rails\` --" \
+               "and may not be preceded by a VAR=value assignment." \
+               "" \
+               "Example:" \
+               "  ${_CG_USAGE}"
+      ;;
+  esac
+fi
 
 # ---------- reach the command wrapper ----------
 # Prepended, so `rails` and `rake` resolve to the wrapper, which re-resolves the
@@ -325,8 +364,8 @@ export CONSOLE_AUDIT_ENABLED=true
 
 # This script is sourced, so clean up after ourselves rather than leaking state
 # into the console session.
-unset -f _cg_deny
+unset -f _cg_deny _cg_show
 unset _cg_enforcing _CG_VERSION _cg_metadata_file _cg_shim_dir _cg_dyno_name \
       _cg_dyno_id _cg_metadata_seen _cg_gated _cg_audited _cg_user_check \
       _cg_reason_check _cg_argv _cg_arg _cg_i _cg_tokens _cg_bin \
-      _CG_DYNO_CMD _CG_USAGE
+      _cg_cmd_read _CG_DYNO_CMD _CG_USAGE
