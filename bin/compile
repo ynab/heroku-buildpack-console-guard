@@ -70,18 +70,25 @@ render "$BUILDPACK_DIR/profile/console_guard.sh" \
        "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
 chmod 644 "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
 
-# The command wrapper. Installed under both names; it dispatches on $0. This is
-# where all argument policy lives, because it is the first point at which the
+# The command wrapper. Installed under all three names; it dispatches on $0. This
+# is where all argument policy lives, because it is the first point at which the
 # shell has finished expanding the operator's command.
+#
+# `bundle` is one of them because Heroku's Ruby buildpack rewrites `rake <task>`
+# on a one-off dyno to `bundle exec rake <task>`, and `bundle exec` then puts
+# Bundler's own bin directory ahead of this one on PATH -- so the rails/rake
+# wrapper is never reached and policy has to be applied by the `bundle` wrapper
+# itself.
 SHIM_DIR="$BUILD_DIR/.console-guard/bin"
 mkdir -p "$SHIM_DIR"
 render "$BUILDPACK_DIR/guard/shim.sh" "$SHIM_DIR/rails"
 cp "$SHIM_DIR/rails" "$SHIM_DIR/rake"
-chmod 755 "$SHIM_DIR/rails" "$SHIM_DIR/rake"
+cp "$SHIM_DIR/rails" "$SHIM_DIR/bundle"
+chmod 755 "$SHIM_DIR/rails" "$SHIM_DIR/rake" "$SHIM_DIR/bundle"
 
 {
   echo "profile script: .profile.d/zzz_console_guard.sh"
-  echo "command wrapper: .console-guard/bin/{rails,rake}"
+  echo "command wrapper: .console-guard/bin/{rails,rake,bundle}"
   echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
   echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"
 } | indent

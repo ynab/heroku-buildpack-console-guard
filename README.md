@@ -13,13 +13,14 @@ needs an attributable record of who ran what, and why.
 Once added to an app, the buildpack installs two things:
 
 1. a `.profile.d` script that runs inside every one-off dyno, before the operator's command
-2. a wrapper for `rails` and `rake` on `PATH`, which the profile script makes reachable
+2. a wrapper for `rails`, `rake` and `bundle` on `PATH`, which the profile script makes reachable
 
 Together they:
 
 * require the `CONSOLE_USER` and `CONSOLE_REASON` environment variables
 * reject compound statements and redirections
-* permit only unqualified `rails` and `rake` invocations, minus an explicit deny list
+* permit only unqualified `rails`, `rake` and `bundle exec rails|rake` invocations, minus an
+  explicit deny list
 * warn if [dyno metadata](https://devcenter.heroku.com/articles/dyno-metadata) is not enabled
 * export `CONSOLE_AUDIT_ENABLED=true`
 
@@ -62,12 +63,12 @@ So the profile script checks only what is sound to check on a raw string:
 | Which dyno this is | Read from dyno metadata, not from the command |
 | `CONSOLE_USER` / `CONSOLE_REASON` | Environment, not the command |
 | Compound statements and redirections | Presence of a character in the raw string is exactly the question |
-| `argv[0]` is literally `rails` or `rake` | Quoting or expanding it makes it stop matching, so it fails closed |
+| `argv[0]` is literally `rails`, `rake` or `bundle` | Quoting or expanding it makes it stop matching, so it fails closed |
 
 Everything about the **arguments** lives in the command wrapper
-(`guard/shim.sh`, installed as `.console-guard/bin/{rails,rake}`), which runs after the shell has
+(`guard/shim.sh`, installed as `.console-guard/bin/{rails,rake,bundle}`), which runs after the shell has
 finished expanding and therefore sees the real `argv`. Because `argv[0]` is guaranteed to be
-literally `rails` or `rake`, and because the wrapper directory is prepended to `PATH`, control
+literally `rails`, `rake` or `bundle`, and because the wrapper directory is prepended to `PATH`, control
 always reaches the wrapper.
 
 **Add argument rules to the wrapper, not to the profile script.** A rule added to the profile script
@@ -81,16 +82,31 @@ The buildpack runs inside the dyno, so it can only police the **dyno command** �
 
 ### Allowed
 
-Only `rails` and `rake` invocations, because those are the only paths that enter a Rails process
-where an in-app audit hook can observe what runs. This is an **allowlist**: anything that is not a
-`rails` or `rake` invocation is blocked, whether or not it is named below.
+Only `rails` and `rake` invocations — plain, or under `bundle exec` — because those are the only
+paths that enter a Rails process where an in-app audit hook can observe what runs. This is an
+**allowlist**: anything that is not one of those is blocked, whether or not it is named below.
 
 The name must be **unqualified**. `bin/rails`, `./bin/rails` and `/app/bin/rails` are rejected even
 though they are the same program: naming a path skips the `PATH` lookup that reaches the command
 wrapper, and the wrapper is where argument policy is enforced. A leading `VAR=value` assignment is
 rejected for the same reason — `PATH=/app/bin rails c` would take the wrapper out of the picture.
 
-`bundle exec` is not accepted, since it would also allow `bundle exec bash`.
+### `bundle exec` is required, not optional
+
+Heroku's Ruby buildpack rewrites `rake <task>` on a one-off dyno to
+`bundle exec rake <task>` **before the login shell runs**, so the profile script never sees the
+command the operator typed. `bundle` is therefore on the allowlist: without it no rake task works at
+all. Confirmed on the platform — `rails` is *not* rewritten, only `rake`.
+
+Admitting `bundle` does not admit what it can wrap. The `bundle` wrapper permits `bundle exec`
+followed by an unqualified `rails` or `rake` and nothing else, then applies the same argument rules
+to the rest of the command. `bundle exec bash` is still blocked; it just dies on `bash` one layer
+later than it used to.
+
+This matters more than a convenience: `bundle exec` unshifts Bundler's own bin directory onto `PATH`,
+so `rails` and `rake` resolve to `vendor/bundle/.../bin/` rather than to the wrapper. The `bundle`
+wrapper is the *only* place argument policy can be applied to a rewritten command — which is why it
+duplicates every rule rather than delegating.
 
 ### Blocked, even though they start with `rails` or `rake`
 
@@ -193,7 +209,7 @@ records the installed version:
 ```
 -----> Installing console guard 7f1e0d8
        profile script: .profile.d/zzz_console_guard.sh
-       command wrapper: .console-guard/bin/{rails,rake}
+       command wrapper: .console-guard/bin/{rails,rake,bundle}
        dyno metadata file: /etc/heroku/dyno
        enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time
 ```
@@ -307,7 +323,7 @@ Set by the buildpack itself:
 | Variable | Value | Notes |
 |---|---|---|
 | `CONSOLE_AUDIT_ENABLED` | `true` | Exported on `run`, `scheduler` and `release` dynos, in both enforcement modes. Activates the audit hook in the companion gem. Because `.profile.d` scripts run *after* config vars and `-e` vars are applied, an operator cannot disable it via `-e`. In local and development environments, where this buildpack does not run, set it manually to opt in |
-| `PATH` | prepended | With `.console-guard/bin`, so `rails` and `rake` resolve to the command wrapper |
+| `PATH` | prepended | With `.console-guard/bin`, so `rails`, `rake` and `bundle` resolve to the command wrapper |
 | `EDITOR`, `VISUAL` | unset | They are a shell escape via `rails credentials:edit` |
 
 Populated automatically by Heroku:
@@ -340,7 +356,7 @@ shellcheck -s bash bin/* profile/*.sh guard/*.sh test/*.sh test/lib/*.sh
 
 The suite compiles the buildpack into a temporary build directory and runs payloads through a login
 shell arranged to look like a one-off dyno — `$HOME` is the build directory, `$HOME/.profile` sources
-`.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake` on `PATH` reports the `argv` it
+`.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake`/`bundle` on `PATH` reports the `argv` it
 received. A test therefore distinguishes "blocked" from "ran, with exactly these arguments".
 
 Every bypass fixed in this repo has a regression case, and CI runs the suite inside the

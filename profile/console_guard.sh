@@ -157,10 +157,11 @@ _CG_USAGE='heroku run -e "CONSOLE_USER=$(heroku whoami);CONSOLE_REASON=test" rai
 # ---------- the command wrapper must be installed ----------
 # All argument policy lives in the wrapper. If it is missing this script cannot
 # enforce anything meaningful, so refuse rather than run half a gate.
-if [[ ! -x "$_cg_shim_dir/rails" || ! -x "$_cg_shim_dir/rake" ]]; then
+if [[ ! -x "$_cg_shim_dir/rails" || ! -x "$_cg_shim_dir/rake" ||
+      ! -x "$_cg_shim_dir/bundle" ]]; then
   _cg_deny "The console guard command wrapper is missing from this dyno." \
            "" \
-           "Expected: ${_cg_shim_dir}/{rails,rake}" \
+           "Expected: ${_cg_shim_dir}/{rails,rake,bundle}" \
            "" \
            "This is a build problem, not an operator mistake. Redeploy the" \
            "app; if it persists the buildpack is misconfigured."
@@ -290,13 +291,18 @@ IFS=$' \t\n' read -ra _cg_tokens <<< "$_CG_DYNO_CMD"
 _cg_bin="${_cg_tokens[0]:-}"
 
 # ---------- command allowlist ----------
-# Only `rails` and `rake` are permitted, because those are the only paths that
-# enter a Rails process where the console audit hook can observe what runs.
-# Everything else --
+# Only `rails`, `rake` and `bundle` are permitted, because those are the only
+# paths that enter a Rails process where the console audit hook can observe what
+# runs. Everything else --
 # bash, sh, zsh, irb, ruby, node, python, psql, pg_dump, pg_restore, pgcli,
 # curl, wget, nc, ssh, scp, env, printenv, cat -- is blocked by falling through
-# this allowlist. Note that `bundle exec` is NOT permitted: allowing it would
-# allow `bundle exec bash`.
+# this allowlist.
+#
+# `bundle` is here because Heroku's Ruby buildpack rewrites `rake <task>` on a
+# one-off dyno to `bundle exec rake <task>` before this script runs, so without
+# it no rake task works at all. It is admitted only as far as the wrapper: the
+# `bundle` wrapper permits `bundle exec rails|rake` and nothing else, so
+# `bundle exec bash` still dies -- on `bash`, one layer later.
 #
 # The name must be unqualified. `bin/rails` and `/app/bin/rails` are rejected
 # even though they are the same program, because naming a path bypasses the PATH
@@ -305,7 +311,7 @@ _cg_bin="${_cg_tokens[0]:-}"
 # reason: `PATH=/app/bin rails c` would take the wrapper out of the picture.
 if [[ "$_cg_cmd_read" == "true" ]]; then
   case "$_cg_bin" in
-    rails|rake) : ;;
+    rails|rake|bundle) : ;;
     *)
       _cg_deny "This command is not permitted on one-off dynos." \
                "" \
@@ -317,6 +323,7 @@ if [[ "$_cg_cmd_read" == "true" ]]; then
                "Allowed:" \
                "  rails <task>" \
                "  rake <task>" \
+               "  bundle exec rails|rake <task>" \
                "" \
                "The name must be unqualified -- \`rails\`, not \`bin/rails\` --" \
                "and may not be preceded by a VAR=value assignment." \

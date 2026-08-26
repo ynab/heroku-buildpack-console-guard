@@ -53,7 +53,8 @@ assert_blocked 'ruby -e 1'
 assert_blocked 'psql'
 assert_blocked 'printenv'
 assert_blocked 'curl https://example.com'
-assert_blocked 'bundle exec rails c'
+# `bundle exec rails|rake` is permitted -- Heroku's Ruby buildpack produces it
+# for a permitted command. See the bundle exec section for what that admits.
 # Path-qualified forms are rejected because they skip the PATH lookup that
 # reaches the command wrapper.
 assert_blocked 'bin/rails c'           'must be unqualified'
@@ -62,6 +63,34 @@ assert_blocked '/app/bin/rails c'      'must be unqualified'
 # A leading assignment could put the wrapper out of reach: PATH=... rails c
 assert_blocked 'FOO=1 rails c'         'must be unqualified'
 assert_blocked 'PATH=/usr/bin rails c' 'must be unqualified'
+
+cg_section "bundle exec, as Heroku's Ruby buildpack produces it"
+# Heroku rewrites `rake <task>` on a one-off dyno to `bundle exec rake <task>`
+# before the login shell runs, so `bundle` must be permitted or no rake task
+# works at all. `bundle exec` also unshifts Bundler's bin directory onto PATH,
+# which puts the real rails/rake ahead of the wrapper -- so the `bundle` wrapper
+# is the only place the argument rules can be applied, and these cases pin that.
+assert_ran 'bundle exec rake db:migrate'  'bundle exec rake db:migrate'
+assert_ran 'bundle exec rails c'          'bundle exec rails c'
+assert_ran 'bundle exec rails runner Model.some_method'
+# Admitting `bundle` must not admit what it can wrap.
+assert_blocked 'bundle exec bash'         'not permitted'
+assert_blocked 'bundle exec sh -c id'     'not permitted'
+assert_blocked 'bundle exec irb'          'not permitted'
+assert_blocked 'bundle install'           'Ruby buildpack produces'
+assert_blocked 'bundle'                   'Ruby buildpack produces'
+assert_blocked 'bundle exec'              'may be run under'
+assert_blocked 'bundle exec bin/rails c'  'unqualified'
+# Every rule the rails/rake wrapper applies must apply through bundle too,
+# because this is now the only wrapper the command reaches.
+assert_blocked 'bundle exec rails dbconsole'        'raw database session'
+assert_blocked 'bundle exec rails "dbconsole"'      'raw database session'
+assert_blocked 'bundle exec rails credentials:edit' 'editor'
+assert_blocked 'bundle exec rails runner -'         'stdin'
+assert_blocked 'bundle exec rails runner "-"'       'stdin'
+assert_blocked 'bundle exec rails runner script.rb' 'exists on disk'
+assert_blocked 'bundle exec rails runner *.r?'      'exists on disk'
+assert_blocked 'bundle exec rake -c'                'flag is not permitted'
 
 cg_section "denials report what the gate parsed"
 # A denial that does not echo the command cannot be diagnosed from an operator's
@@ -187,6 +216,12 @@ mv "$CG_APP/.console-guard/bin/rails" "$CG_APP/.console-guard/rails.bak"
 assert_blocked 'rails c' 'command wrapper is missing'
 mv "$CG_APP/.console-guard/rails.bak" "$CG_APP/.console-guard/bin/rails"
 assert_ran 'rails c'
+# The bundle wrapper is load-bearing in the same way: without it, Heroku's
+# `bundle exec` rewrite would reach the real bundler with no policy applied.
+mv "$CG_APP/.console-guard/bin/bundle" "$CG_APP/.console-guard/bundle.bak"
+assert_blocked 'rails c' 'command wrapper is missing'
+mv "$CG_APP/.console-guard/bundle.bak" "$CG_APP/.console-guard/bin/bundle"
+assert_ran 'rails c'
 # The guard version appears in denials, so an operator report identifies the
 # deployed guard.
 assert_output 'denials name the guard version' 'bash' 'console-guard '
@@ -233,8 +268,11 @@ cg_section "bin/compile"
 assert_false 'fails when BUILD_DIR is missing'    "$CG_ROOT/bin/compile"
 assert_false 'fails when BUILD_DIR is unwritable' "$CG_ROOT/bin/compile" /proc/nonexistent/app
 assert_true  'installs the profile script' test -f "$CG_APP/.profile.d/zzz_console_guard.sh"
-assert_true  'installs both wrapper names'  test -x "$CG_APP/.console-guard/bin/rails"
-assert_true  'installs both wrapper names'  test -x "$CG_APP/.console-guard/bin/rake"
+assert_true  'installs the rails wrapper'   test -x "$CG_APP/.console-guard/bin/rails"
+assert_true  'installs the rake wrapper'    test -x "$CG_APP/.console-guard/bin/rake"
+assert_true  'installs the bundle wrapper'  test -x "$CG_APP/.console-guard/bin/bundle"
+assert_true  'generated bundle wrapper is valid bash' \
+  bash -n "$CG_APP/.console-guard/bin/bundle"
 assert_false 'leaves no unsubstituted placeholders' \
   grep -rq '@@CG_' "$CG_APP/.profile.d" "$CG_APP/.console-guard"
 assert_true  'generated profile script is valid bash' \

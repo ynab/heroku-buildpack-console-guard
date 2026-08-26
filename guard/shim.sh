@@ -97,15 +97,54 @@ if [[ -z "$_cg_real" ]]; then
   exit 1
 fi
 
+# ---------- what policy applies to ----------
+# Invoked as `bundle`, the interesting command is the one bundler will exec, not
+# bundler itself.
+#
+# Heroku's Ruby buildpack rewrites `rake <task>` on a one-off dyno to
+# `bundle exec rake <task>` before the login shell runs, so `bundle` has to be on
+# the allowlist for any rake task to work at all. It cannot simply be waved
+# through: `bundle exec` unshifts Bundler's own bin directory onto PATH, so the
+# rails/rake wrapper is NOT reached afterwards and this is the only place the
+# argument rules below can be applied.
+_cg_policy_prog="$_cg_prog"
+_cg_policy_args=("$@")
+
+if [[ "$_cg_prog" == "bundle" ]]; then
+  if [[ "${1:-}" != "exec" ]]; then
+    _cg_deny "\`bundle ${1:-}\` is not permitted on one-off dynos." \
+             "" \
+             "Only \`bundle exec rails\` and \`bundle exec rake\` are allowed," \
+             "because those are the forms Heroku's Ruby buildpack produces for" \
+             "a permitted command."
+  fi
+
+  # Unqualified, for the same reason the profile script requires it of the
+  # command itself: a path names a program this wrapper has not vetted.
+  case "${2:-}" in
+    rails|rake)
+      _cg_policy_prog="$2"
+      ;;
+    *)
+      _cg_deny "\`bundle exec ${2:-}\` is not permitted on one-off dynos." \
+               "" \
+               "Only \`rails\` and \`rake\` may be run under \`bundle exec\`," \
+               "and the name must be unqualified."
+      ;;
+  esac
+
+  _cg_policy_args=("${@:3}")
+fi
+
 # ---------- policy ----------
 
-_cg_sub="${1:-}"
+_cg_sub="${_cg_policy_args[0]:-}"
 
 # `rails dbconsole` / `rails db` drop to a raw psql session; no statement is
 # ever seen by the console audit hook.
 case "$_cg_sub" in
   dbconsole|db)
-    _cg_deny "\`${_cg_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
+    _cg_deny "\`${_cg_policy_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
              "" \
              "It opens a raw database session, so no statement reaches the" \
              "console audit hook."
@@ -117,13 +156,13 @@ esac
 # profile script also unsets EDITOR and VISUAL; this is the second layer.
 case "$_cg_sub" in
   credentials:*|encrypted:*)
-    _cg_deny "\`${_cg_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
+    _cg_deny "\`${_cg_policy_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
              "" \
              "These commands spawn an editor, which is a shell escape."
     ;;
 esac
 
-for _cg_arg in "$@"; do
+for _cg_arg in ${_cg_policy_args[@]+"${_cg_policy_args[@]}"}; do
   # A bare `-` makes `rails runner` read the program from stdin, so the code
   # that runs appears in no log at all -- not the dyno command string, not the
   # api:dyno webhook, not an in-app ARGV capture.
@@ -150,8 +189,8 @@ done
 # Rails decides file-vs-inline-code by whether the path exists on disk. We are
 # past expansion here, so we can apply that same test rather than guessing from
 # how the argument looks.
-if [[ "$_cg_prog" == "rails" && ( "$_cg_sub" == "runner" || "$_cg_sub" == "r" ) ]]; then
-  for _cg_arg in "${@:2}"; do
+if [[ "$_cg_policy_prog" == "rails" && ( "$_cg_sub" == "runner" || "$_cg_sub" == "r" ) ]]; then
+  for _cg_arg in "${_cg_policy_args[@]:1}"; do
     case "$_cg_arg" in
       --file|--file=*)
         _cg_deny "\`rails runner\` may not read its program from a file." \

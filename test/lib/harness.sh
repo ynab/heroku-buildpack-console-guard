@@ -69,7 +69,7 @@ cg_build() {
   # A fake rails/rake that reports its argv and the environment the guard left
   # behind. Stands in for the real binaries the wrapper execs into.
   local fake
-  for fake in rails rake; do
+  for fake in rails rake bundle; do
     cat > "$base/fakebin/$fake" <<EOF
 #!/usr/bin/env bash
 echo "RAN ${fake} \$*"
