@@ -75,6 +75,7 @@ cg_build() {
 echo "RAN ${fake} \$*"
 echo "EDITOR=\${EDITOR-unset}"
 echo "AUDIT=\${CONSOLE_AUDIT_ENABLED-unset}"
+echo "USER=\${CONSOLE_USER-unset}"
 EOF
     chmod 755 "$base/fakebin/$fake"
   done

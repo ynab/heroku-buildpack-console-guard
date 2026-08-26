@@ -41,9 +41,16 @@ assert_ran 'rake -T'                        'rake -T'
 assert_ran 'rails runner -e production Model.foo'
 
 cg_section "identification is required"
-cg_env 'CONSOLE_USER='       ; assert_blocked 'rails c' 'CONSOLE_USER and CONSOLE_REASON are required'
-cg_env 'CONSOLE_REASON='     ; assert_blocked 'rails c' 'CONSOLE_USER and CONSOLE_REASON are required'
-cg_env 'CONSOLE_REASON=   '  ; assert_blocked 'rails c' 'CONSOLE_USER and CONSOLE_REASON are required'
+cg_env 'CONSOLE_USER='       ; assert_blocked 'rails c' 'CONSOLE_USER is not set'
+cg_env 'CONSOLE_REASON='     ; assert_blocked 'rails c' 'CONSOLE_REASON is not set'
+cg_env 'CONSOLE_REASON=   '  ; assert_blocked 'rails c' 'CONSOLE_REASON is not set'
+cg_env 'CONSOLE_USER=   '    ; assert_blocked 'rails c' 'CONSOLE_USER is not set'
+# Naming the missing one matters: the usual cause is a failed `heroku whoami`
+# substituting an empty string, which looks like neither was set.
+cg_env 'CONSOLE_USER= CONSOLE_REASON=' ; assert_blocked 'rails c' \
+  'CONSOLE_USER and CONSOLE_REASON are not set'
+cg_env 'CONSOLE_USER='       ; assert_no_output 'names only the missing variable' \
+  'rails c' 'CONSOLE_REASON is not set'
 
 cg_section "allowlist"
 assert_blocked 'bash'                  'not permitted'
@@ -258,6 +265,16 @@ assert_ran 'rails runner "-"'
 assert_ran 'rails credentials:edit'
 cg_env 'CONSOLE_USER=' ; assert_output 'missing identification warns and permits' \
   'rails c' 'WILL BE BLOCKED'
+# An empty CONSOLE_USER is not enough to be non-blocking: console1984 raises
+# MissingUsername on one, so the console dies anyway and permit mode fails to
+# permit. The app gets a placeholder instead -- obviously not a real username,
+# so an audit record cannot be mistaken for an identified session.
+cg_env 'CONSOLE_USER=' ; assert_output 'permit mode supplies a placeholder operator' \
+  'rails c' 'USER=[not provided]'
+cg_env 'CONSOLE_USER=   ' ; assert_output 'whitespace-only counts as absent here too' \
+  'rails c' 'USER=[not provided]'
+# A supplied identity is passed through untouched.
+assert_output 'a real CONSOLE_USER is left alone' 'rails c' 'USER=becky'
 # ...but tampering with the dyno name is still fatal in permit mode.
 cg_write_metadata '{"dyno":{"id":"uuid","name":"run.1234"},"app":{"id":"aid","name":""},"release":{"id":117}}'
 cg_env 'DYNO=web.1' ; assert_blocked 'bash' 'does not match this dyno'

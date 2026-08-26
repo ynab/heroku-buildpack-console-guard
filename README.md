@@ -261,6 +261,14 @@ check still runs and reports on stderr, but a failure is a warning rather than a
 `CONSOLE_AUDIT_ENABLED=true` is still exported so audit records are produced throughout. Use this to
 find non-permitted commands and missing environment variables, and update the callers.
 
+In permit mode a missing `CONSOLE_USER` is replaced with the literal `[not provided]` before the
+command runs. This is not cosmetic: console1984 raises `MissingUsername` on an empty operator
+(`ask_for_username_if_empty` defaults to `false`), so without a value the console dies anyway and
+permit mode fails to permit — the one thing it exists to do. The placeholder is deliberately not a
+plausible username, so an audit record can never be mistaken for an identified session, and it can
+never collide with a real `heroku whoami` value. When enforcing, the session is refused instead and
+no placeholder is set.
+
 **Phase 2 — block.** Remove the config var. Enforcement is the **default**, so an app that was never
 configured fails closed. Only the exact value `false` opts into permit mode; anything else enforces.
 
@@ -302,7 +310,7 @@ Provided per-session via `-e`, and required for every `heroku run`:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONSOLE_USER` | Yes | Self-reported operator identity; should be the `heroku whoami` value. Whitespace-only counts as missing. Session exits if unset |
+| `CONSOLE_USER` | Yes | Self-reported operator identity; should be the `heroku whoami` value. Whitespace-only counts as missing. Session exits if unset when enforcing; in permit mode it becomes `[not provided]` |
 | `CONSOLE_REASON` | Yes | Free-text justification. Whitespace-only counts as missing. May not contain `;`. Session exits if unset |
 
 Set as a config var on the app, and read at **run** time:

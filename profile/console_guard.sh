@@ -171,14 +171,47 @@ fi
 # A value that is entirely whitespace is treated the same as an unset one.
 _cg_user_check="${CONSOLE_USER:-}"
 _cg_reason_check="${CONSOLE_REASON:-}"
-if [[ -z "${_cg_user_check//[[:space:]]/}" || -z "${_cg_reason_check//[[:space:]]/}" ]]; then
-  _cg_deny "CONSOLE_USER and CONSOLE_REASON are required." \
+
+# Name the one that is missing. "both are required" sends an operator checking
+# the variable that was already fine, and the usual cause -- a failed
+# `heroku whoami` substituting an empty string -- looks like neither was set.
+_cg_missing=()
+[[ -z "${_cg_user_check//[[:space:]]/}" ]]   && _cg_missing+=("CONSOLE_USER")
+[[ -z "${_cg_reason_check//[[:space:]]/}" ]] && _cg_missing+=("CONSOLE_REASON")
+
+if (( ${#_cg_missing[@]} > 0 )); then
+  if (( ${#_cg_missing[@]} == 2 )); then
+    _cg_missing_desc="CONSOLE_USER and CONSOLE_REASON are"
+  else
+    _cg_missing_desc="${_cg_missing[0]} is"
+  fi
+  _cg_deny "${_cg_missing_desc} not set." \
            "" \
-           "CONSOLE_USER must be your \`heroku whoami\` value, so that console" \
-           "records can be compared against Heroku's own audit trail." \
+           "Both are required on one-off dynos. CONSOLE_USER must be your" \
+           "\`heroku whoami\` value, so that console records can be compared" \
+           "against Heroku's own audit trail." \
+           "" \
+           "If you built CONSOLE_USER from \`heroku whoami\`, check that it" \
+           "succeeded -- an expired login makes it print an error and return" \
+           "an empty string, which arrives here as unset." \
            "" \
            "Usage:" \
            "  ${_CG_USAGE}"
+fi
+
+# ---------- permit mode still has to hand the app an operator ----------
+# console1984 raises MissingUsername on an empty CONSOLE_USER
+# (ask_for_username_if_empty defaults to false), so leaving it empty kills the
+# console even in permit mode -- which is exactly the breakage permit mode
+# exists to avoid during phase 1. Supply a placeholder instead.
+#
+# Deliberately not a plausible username: it has to be obvious in an audit record
+# that nobody identified themselves, and it must never collide with a real
+# `heroku whoami` value.
+#
+# Only in permit mode. When enforcing, _cg_deny above has already exited.
+if [[ "$_cg_enforcing" != "true" && -z "${_cg_user_check//[[:space:]]/}" ]]; then
+  export CONSOLE_USER="[not provided]"
 fi
 
 # ---------- determine the dyno command ----------
@@ -374,5 +407,5 @@ export CONSOLE_AUDIT_ENABLED=true
 unset -f _cg_deny _cg_show
 unset _cg_enforcing _CG_VERSION _cg_metadata_file _cg_shim_dir _cg_dyno_name \
       _cg_dyno_id _cg_metadata_seen _cg_gated _cg_audited _cg_user_check \
-      _cg_reason_check _cg_argv _cg_arg _cg_i _cg_tokens _cg_bin \
-      _cg_cmd_read _CG_DYNO_CMD _CG_USAGE
+      _cg_reason_check _cg_missing _cg_missing_desc _cg_argv _cg_arg _cg_i \
+      _cg_tokens _cg_bin _cg_cmd_read _CG_DYNO_CMD _CG_USAGE
