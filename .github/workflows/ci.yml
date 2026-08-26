@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  # Limited to main on purpose. A commit on a branch with an open PR is already
+  # covered by the pull_request trigger, and matching "**" here made both fire
+  # on the same commit, so every check ran twice.
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
+
+      # Pinned rather than installed from apt: Ubuntu 24.04 only carries 0.9.0.
+      # Bumping the version means bumping the checksum in the same commit.
+      - name: Install shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" -o shellcheck.tar.xz
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          rm -rf shellcheck.tar.xz "shellcheck-${SHELLCHECK_VERSION}"
+
+      # Files are discovered rather than listed, so splitting a script into
+      # several files cannot silently drop it from the lint.
+      - name: shellcheck
+        run: |
+          shellcheck --version
+
+          files=$(git ls-files | while read -r f; do
+            if [ "${f##*.}" = "sh" ] || head -n 1 "$f" | grep -qE '^#!.*(bash|sh)( |$)'; then
+              printf '%s\n' "$f"
+            fi
+          done)
+
+          if [ -z "$files" ]; then
+            echo "shellcheck: no shell files discovered, so this job proves nothing" >&2
+            exit 1
+          fi
+
+          echo "$files" | sed 's/^/linting /'
+
+          # -s bash because the .profile.d fragment is sourced and so carries no
+          # shebang, and bash is what Heroku's login shell is.
+          # shellcheck disable=SC2086
+          shellcheck -s bash $files

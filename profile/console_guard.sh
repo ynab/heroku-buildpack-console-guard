@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # `$(` and friends appear here as literals to match on
 # Console gate for one-off Heroku dynos.
 # Installed by heroku-buildpack-console-guard into .profile.d/
 #
