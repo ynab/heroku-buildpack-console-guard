@@ -23,7 +23,7 @@ touch "$CG_APP/payload.rb" "$CG_APP/script.rb"
 
 cg_section "permitted commands still work"
 assert_ran 'rails c'                        'rails c'
-assert_ran 'rails console --sandbox'        'rails console --sandbox'
+assert_ran 'rails console'                  'rails console'
 assert_ran 'rake some_task:some_action'     'rake some_task:some_action'
 assert_ran 'rails runner Model.some_method' 'rails runner Model.some_method'
 # Quoted inline code has to keep working: the wrapper exists so that policy can
@@ -156,6 +156,21 @@ assert_blocked 'rails runner -""'               'stdin'
 assert_blocked 'rails "-c" foo'                 'flag is not permitted'
 assert_blocked 'rails runner "--file=/app/script.rb"'
 assert_blocked 'rails runner "--file" script.rb'
+
+cg_section "sandboxed consoles roll back the audit trail"
+assert_blocked 'rails console --sandbox'        'unlogged'
+assert_blocked 'rails c --sandbox'              'unlogged'
+assert_blocked 'rails c -s'                     'unlogged'
+assert_blocked 'rails console -s'               'unlogged'
+assert_blocked 'bundle exec rails c --sandbox'  'unlogged'
+assert_blocked 'rails c "--sandbox"'            'unlogged'
+cg_env 'S=--sandbox'            ; assert_blocked 'rails c $S'           'unlogged'
+# Scoped to the console: -s is rake's silent flag, and --no-sandbox is the safe
+# direction. Neither is collateral damage.
+assert_ran 'rake -s some:task'
+assert_ran 'rails c --no-sandbox'
+assert_ran 'rails runner -s'
+assert_ran 'rails c'
 
 cg_section "regression (finding 2): parameter expansion must not defeat policy"
 cg_env 'P=-'                    ; assert_blocked 'rails runner $P'      'stdin'

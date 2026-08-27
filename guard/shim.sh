@@ -183,6 +183,35 @@ for _cg_arg in ${_cg_policy_args[@]+"${_cg_policy_args[@]}"}; do
   fi
 done
 
+# `rails console --sandbox` wraps the whole session in a transaction that is
+# rolled back on exit. The audit records are enqueued through ActiveJob, and a
+# database-backed queue on the primary database (eg Solid Queue) puts that 
+# enqueue inside the same transaction -- so the rollback discards
+# the audit trail along with the operator's changes, leaving an interactive
+# console with no record of a single statement.
+#
+# Scoped to `console`/`c` rather than applied to every argv, because `-s` is
+# `rake`'s silent flag and legitimate there. `--no-sandbox` must keep working.
+#
+# The console_audit gem sets Rails' own `config.disable_sandbox = true` when
+# auditing is active, which is a second layer over the same dynos: it holds even
+# if the command never reaches this wrapper.
+if [[ "$_cg_policy_prog" == "rails" && ( "$_cg_sub" == "console" || "$_cg_sub" == "c" ) ]]; then
+  for _cg_arg in "${_cg_policy_args[@]:1}"; do
+    case "$_cg_arg" in
+      --sandbox|-s)
+        _cg_deny "\`rails ${_cg_sub} ${_cg_arg}\` is not permitted on one-off dynos." \
+                 "" \
+                 "A sandboxed console rolls back its transaction on exit, which" \
+                 "discards the queued audit records with it -- the session would" \
+                 "run entirely unlogged." \
+                 "" \
+                 "Use \`rails ${_cg_sub}\` instead. It is audited."
+        ;;
+    esac
+  done
+fi
+
 # `rails runner` reading its program from a file has the same shape as reading
 # from stdin: the command string names a path rather than the code that runs.
 #
