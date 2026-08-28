@@ -142,6 +142,42 @@ assert_blocked 'rake some:task <<< "x"'        'redirections'
 assert_blocked 'rails runner Model.foo > /tmp/o'
 assert_blocked 'rails runner Model.foo 2>/tmp/o'
 
+cg_section "the CLI's --exit-code marker"
+# `heroku run --exit-code` appends this to the dyno command and reads the line it
+# produces off stdout. Without special handling every CI caller is denied as a
+# compound statement, and every denial exits 0 because the appended echo never runs.
+CG_SENTINEL=$'￿'
+CG_MARKER="; echo \"${CG_SENTINEL} heroku-command-exit-status: \$?\""
+
+assert_ran    "rake db:version${CG_MARKER}"          'rake db:version'
+assert_ran    "rails runner 1${CG_MARKER}"           'rails runner 1'
+assert_ran    "bundle exec rake db:version${CG_MARKER}"
+
+# The marker is stripped, not trusted: what precedes it is still vetted in full.
+assert_blocked "psql${CG_MARKER}"                    'not permitted'
+assert_blocked "rails c ; bash${CG_MARKER}"          'Compound'
+assert_blocked "rails dbconsole${CG_MARKER}"         'not permitted'
+
+# Stripped at most once, so a second copy still reads as a compound.
+assert_blocked "rails c${CG_MARKER}${CG_MARKER}"     'Compound'
+
+# The reason the match is an exact literal rather than a pattern: a loose rule
+# such as s/;.*exit-status.*$// strips this back to `rails c` and lets a shell out.
+assert_blocked 'rails c ; bash # heroku-command-exit-status'  'Compound'
+assert_blocked 'rails c ; bash ; echo "heroku-command-exit-status: $?"' 'Compound'
+
+# A denial has to stand in for the echo it skipped, on stdout, or the CLI reports
+# success for a command that never ran.
+assert_output 'denial emits a failing exit-status marker when --exit-code was used' \
+  "psql${CG_MARKER}" "${CG_SENTINEL} heroku-command-exit-status: 1"
+cg_env 'CONSOLE_USER=' ; assert_output \
+  'the identity gate emits it too -- the denial CI is likeliest to hit' \
+  "rake db:version${CG_MARKER}" "${CG_SENTINEL} heroku-command-exit-status: 1"
+
+# ...and must not invent one for a caller that never asked for it.
+assert_no_output 'no marker without --exit-code' \
+  'psql' 'heroku-command-exit-status'
+
 cg_section "regression (finding 2): quote removal must not defeat policy"
 assert_blocked 'rails "dbconsole"'              'not permitted'
 assert_blocked "rails 'dbconsole'"              'not permitted'

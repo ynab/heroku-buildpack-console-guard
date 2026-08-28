@@ -18,7 +18,7 @@ Once added to an app, the buildpack installs two things:
 Together they:
 
 * require the `CONSOLE_USER` and `CONSOLE_REASON` environment variables
-* reject compound statements and redirections
+* reject compound statements and redirections, while allowing the `--exit-code` marker the Heroku CLI appends
 * permit only unqualified `rails`, `rake` and `bundle exec rails|rake` invocations, minus an
   explicit deny list
 * warn if [dyno metadata](https://devcenter.heroku.com/articles/dyno-metadata) is not enabled
@@ -165,6 +165,41 @@ rather than the code that runs. The command is therefore rejected if it contains
 
 This is best effort. `rails runner 'system("bash")'` contains none of these and still reaches a
 shell.
+
+### `heroku run --exit-code`
+
+`heroku run` does not report a command's exit status unless you pass `--exit-code`, and the CLI
+implements that flag by appending to the dyno command:
+
+```
+rake db:version ; echo "<U+FFFF> heroku-command-exit-status: $?"
+```
+
+It then reads that line off **stdout** to decide what to exit with. Two consequences, both handled
+here:
+
+1. **Every `--exit-code` caller is a compound statement.** Untreated, the check above denies all of
+   them. This is not something a caller can avoid by simplifying its command — the `;` is the CLI's,
+   not theirs, so rewriting a pipeline as a single rake task does not help.
+2. **A denial exits during `.profile.d`, so the appended `echo` never runs.** No marker reaches
+   stdout, the CLI has nothing to read, and it reports success for a command that was refused. A
+   blocked CI job would go green.
+
+So the guard strips the marker before vetting, and emits `<U+FFFF> heroku-command-exit-status: 1` on
+stdout itself when it denies a session that carried one.
+
+The strip is an **exact literal match, anchored to the end, applied at most once**. A looser pattern
+would be a shell escape: `rails c ; bash # heroku-command-exit-status` must not be stripped back to
+`rails c`. Two markers leave one behind, which the compound check then rejects, and what precedes the
+marker is still vetted in full — `psql ; echo "<marker>"` is denied on the allowlist.
+
+If Heroku changes the marker, the strip stops matching and `--exit-code` callers are denied again.
+Noisy, but the safe direction.
+
+> The sentinel is written as explicit UTF-8 bytes (`$'\xef\xbf\xbf'`) rather than `$'\uffff'`. A
+> one-off dyno runs in the C locale, where bash cannot represent U+FFFF and silently yields the
+> six-character string `\uFFFF` instead — the strip would never match, and the emitted marker would
+> be unrecognisable to the CLI.
 
 ### If the command cannot be read
 

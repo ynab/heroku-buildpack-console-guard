@@ -128,6 +128,46 @@ if [[ "$_cg_gated" != "true" ]]; then
   return 0
 fi
 
+# ---------- the CLI's exit-status marker ----------
+# `heroku run --exit-code` appends
+#
+#   ; echo "<U+FFFF> heroku-command-exit-status: $?"
+#
+# to the dyno command and reads the resulting line off stdout to decide what to
+# exit with. It is the only way `heroku run` reports failure, so every CI caller
+# that can tell a broken migration from a good one uses it.
+#
+# That matters here twice over. The appended text makes the command a compound
+# statement, which the gate below would otherwise reject; and a denial exits
+# during .profile.d, so the appended `echo` never runs, no marker reaches stdout,
+# and the CLI reports success for a command it never ran.
+# U+FFFF as explicit UTF-8 bytes, not the \u escape. A one-off dyno runs in the C
+# locale (`locale charmap` is ANSI_X3.4-1968), and there bash cannot represent the
+# codepoint, so the \u form silently yields the six-character string \uFFFF. The
+# strip would then never match and the denial marker would be unrecognisable.
+_CG_EXIT_SENTINEL=$'\xef\xbf\xbf'
+_CG_EXIT_MARKER="; echo \"${_CG_EXIT_SENTINEL} heroku-command-exit-status: \$?\""
+
+# Read the login shell's argv up front: both the marker check and the command
+# parsing below need it, and _cg_deny needs the marker answer from its very first
+# call site -- the identity gate is the denial CI is most likely to hit.
+_cg_argv=()
+if [[ -r /proc/$$/cmdline ]]; then
+  while IFS= read -r -d '' _cg_arg; do
+    _cg_argv+=("$_cg_arg")
+  done < /proc/$$/cmdline
+fi
+
+# True only when the caller passed --exit-code, so a plain `heroku run` is not
+# given a stray marker line it never asked for.
+_cg_exit_marker_seen=false
+for _cg_arg in "${_cg_argv[@]}"; do
+  if [[ "$_cg_arg" == *"$_CG_EXIT_MARKER" ]]; then
+    _cg_exit_marker_seen=true
+    break
+  fi
+done
+
 # Print a denial. Exits the dyno when enforcing; warns and continues otherwise.
 _cg_deny() {
   local _cg_line
@@ -148,6 +188,13 @@ _cg_deny() {
   } >&2
 
   if [[ "$_cg_enforcing" == "true" ]]; then
+    # Stand in for the `echo` the CLI appended, which exiting here skips. On
+    # stdout, because that is the stream the CLI parses -- the banner above goes
+    # to stderr and is invisible to it. Without this a denied CI job exits 0 and
+    # the pipeline goes green.
+    if [[ "$_cg_exit_marker_seen" == "true" ]]; then
+      printf '%s heroku-command-exit-status: 1\n' "$_CG_EXIT_SENTINEL"
+    fi
     exit 1
   fi
 }
@@ -217,13 +264,8 @@ fi
 # ---------- determine the dyno command ----------
 # Heroku executes the one-off command through a login shell, which is the process
 # that sources this script. Its argv is therefore `bash -c <the dyno command>`;
-# we want the payload, not the wrapper.
-_cg_argv=()
-if [[ -r /proc/$$/cmdline ]]; then
-  while IFS= read -r -d '' _cg_arg; do
-    _cg_argv+=("$_cg_arg")
-  done < /proc/$$/cmdline
-fi
+# we want the payload, not the wrapper. `_cg_argv` was read above, where the
+# exit-status marker check needed it.
 
 # Denials echo the command back. Without it a denial cannot be diagnosed from the
 # operator's side -- "this command is not permitted" says nothing about which
@@ -283,6 +325,26 @@ else
              "  $(_cg_show "${_cg_argv[*]}")" \
              "" \
              "This is a platform or build problem, not an operator mistake."
+  fi
+fi
+
+# ---------- strip the CLI's exit-status marker ----------
+# Removed before vetting, so `heroku run --exit-code rake foo` is judged on
+# `rake foo` rather than on the compound the CLI made of it. See the marker
+# definition near the top for why dropping --exit-code is not an option.
+#
+# Exact literal, anchored to the end, removed at most once. A looser pattern is a
+# shell escape: `rails c ; bash # heroku-command-exit-status` would be stripped
+# back to `rails c` and permitted. Two markers leave one behind, which the
+# compound check then rejects.
+#
+# If Heroku changes the marker this stops matching and CI is denied again --
+# noisy, but the safe direction to fail in.
+if [[ "$_cg_cmd_read" == "true" ]]; then
+  _cg_candidate="${_CG_DYNO_CMD%"${_CG_DYNO_CMD##*[![:space:]]}"}"
+  if [[ "$_cg_candidate" == *"$_CG_EXIT_MARKER" ]]; then
+    _cg_candidate="${_cg_candidate%"$_CG_EXIT_MARKER"}"
+    _CG_DYNO_CMD="${_cg_candidate%"${_cg_candidate##*[![:space:]]}"}"
   fi
 fi
 
