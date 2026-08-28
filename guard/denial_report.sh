@@ -22,14 +22,25 @@
 # proxy already derives (`dyno_id`, and `console_identity` from `operator`)
 # apply to these records unchanged. `event` is what tells them apart.
 #
-# NO ATTRIBUTION FIELDS
+# ATTRIBUTION: `app` ONLY
 #
-# The gem sends `service` / `env` / `app` / `version`, but stamps them on the
+# The gem sends `service` / `env` / `app` / `version` and stamps them on the
 # *worker*, because `heroku run -e` can rewrite every one of them and a record
 # tagged `env:staging` would keep flowing to Datadog while dropping quietly out
-# of a production-scoped monitor. This runs inside the one-off dyno, where that
-# defence is not available, so it sends none of them and lets datadog-proxy
-# attribute the record from the credential it was authenticated with.
+# of a production-scoped monitor. There is no worker here, so nothing sent from
+# this side can carry that guarantee.
+#
+# `app` is sent anyway, because the alternative is worse. Without it a denial
+# record has no `@app`, and the cross-check queries -- which scope on `@app` to
+# reach both log sources at once -- silently skip every denial. And the tampering
+# argument does not actually transfer: an operator who wants their denial record
+# gone can unset the endpoint above and delete it outright, so forging the app
+# name is strictly weaker than what they can already do. Attribution tampering
+# needs closing where suppression is impossible, which is the gem's position and
+# not this one.
+#
+# `service` / `env` / `version` stay unsent: nothing needs them for scoping, and
+# datadog-proxy derives the service from the credential, which cannot be forged.
 #
 # LIMITATION
 #
@@ -120,6 +131,8 @@ _cg_report_denial() {
   # session whose $DYNO disagrees with it. HEROKU_DYNO_ID is the fallback and is
   # `-e`-settable, so it is only as good as the app's metadata being enabled.
   _cg_body+="$(_cg_json_field dyno_id "${CONSOLE_GUARD_DYNO_ID:-${HEROKU_DYNO_ID:-}}")"
+  # The one attribution field, so `@app` reaches this record too. See the header.
+  _cg_body+="$(_cg_json_field app "${HEROKU_APP_NAME:-}")"
   _cg_body+="$(_cg_json_field guard_version "$_CG_REPORT_VERSION")"
   # datadog-proxy claims `timestamp` as the log's official date, exactly as it
   # does for the gem's records, so a denial is filed at the moment it happened.

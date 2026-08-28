@@ -294,6 +294,7 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
   "operator": "becky@example.com",
   "reason": "checking a migration",
   "dyno_id": "b922dfe5-0ede-45c8-a267-78bff7a23481",
+  "app": "my-app",
   "guard_version": "7f1e0d8",
   "timestamp": "2026-08-28T06:24:43.000Z"
 }
@@ -313,11 +314,18 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
   is stripped first, so a CI denial records the command the caller wrote.
 - **`dyno_id`** comes from the dyno metadata file, not from `HEROKU_DYNO_ID`, which `-e` can set to
   anything. It is the join key against the `api:dyno` webhook.
-- No `service` / `env` / `app` fields. The gem sends those but stamps them on the **worker**, because
-  `heroku run -e` can rewrite every one of them and a record tagged `env:staging` would keep flowing
-  to Datadog while dropping quietly out of a production-scoped monitor. This runs inside the one-off
-  dyno, where that defence is not available, so it sends none of them and lets the proxy attribute
-  the record from the credential it was authenticated with.
+- **`app`** is the only attribution field sent, and it comes from `HEROKU_APP_NAME`. The gem sends
+  `service`/`env`/`app`/`version` but stamps them on its **worker**, because `heroku run -e` can
+  rewrite all four and a record tagged `env:staging` would keep flowing to Datadog while dropping
+  quietly out of a production-scoped monitor. There is no worker here, so nothing sent from the dyno
+  carries that guarantee — but omitting `app` is worse: the cross-check queries scope on `@app` to
+  reach both log sources at once, so a denial record without it is silently skipped by every one of
+  them. The tampering argument also does not transfer. An operator who wants their denial record gone
+  can unset the endpoint and delete it outright, so forging the app name is strictly weaker than what
+  they can already do; attribution tampering needs closing where suppression is impossible, which is
+  the gem's position and not this one.
+- No `service` / `env` / `version`. Nothing needs them for scoping, and `datadog-proxy` derives the
+  service from the credential, which is the half an operator cannot forge.
 
 Reporting is **fail-open and best effort**: one attempt, a 4-second ceiling, no retry, and a failure
 warns on stderr without holding up the denial. Refusing the command is the control; recording it must

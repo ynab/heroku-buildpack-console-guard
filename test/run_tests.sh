@@ -469,6 +469,22 @@ assert_reported 'carries the reason'          'bash'  '"reason":"testing"'
 # than from HEROKU_DYNO_ID, which `heroku run -e` can set to anything.
 assert_reported 'carries the trusted dyno id' 'bash'  '"dyno_id":"dyno-uuid-1"'
 assert_reported 'marks the denial enforced'   'bash'  '"enforced":true'
+# Without `app` the cross-check queries, which scope on @app to reach both log
+# sources at once, skip every denial record. See guard/denial_report.sh.
+cg_env 'HEROKU_APP_NAME=some-app'
+assert_reported 'carries the app, so @app reaches this record' 'bash' \
+  '"app":"some-app"'
+# ...and nothing else attributional: the proxy derives service from the
+# credential, which is the half an operator cannot forge.
+#
+# Matched with the leading comma and trailing colon, because `"version"` is a
+# substring of the `guard_version` field that is legitimately there.
+cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=lies DD_VERSION=lies'
+assert_not_reported_field 'sends no env'     'bash' ',"env":'
+cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=lies DD_VERSION=lies'
+assert_not_reported_field 'sends no service' 'bash' ',"service":'
+cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=lies DD_VERSION=lies'
+assert_not_reported_field 'sends no version' 'bash' ',"version":'
 cg_run_reporting 'bash'
 assert_true 'goes to the configured endpoint' \
   grep -q "example.invalid/webhooks/console_audit" "$CG_CURL_LOG"
