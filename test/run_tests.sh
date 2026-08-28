@@ -452,6 +452,84 @@ cg_write_metadata '{"dyno":{"id":"uuid","name":"run.1234"},"app":{"id":"aid","na
 cg_env 'DYNO=web.1' ; assert_blocked 'bash' 'does not match this dyno'
 cg_env_sticky
 
+# ============================================================ denial records
+# The denial banner reaches only the operator's terminal, so without these the
+# only durable trace of a blocked command is Heroku's api:dyno record, which
+# cannot tell a guard denial from an application error.
+cg_section "denials are recorded durably"
+cg_build report CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/report/dyno-metadata.json"
+cg_write_metadata '{"dyno":{"id":"dyno-uuid-1","name":"run.1234"},"app":{"id":"aid","name":""},"release":{"id":117}}'
+
+assert_reported 'a profile denial is POSTed'  'bash'  '"event":"command_denied"'
+assert_reported 'names the rule that refused' 'bash'  '"rule":"command_not_allowed"'
+assert_reported 'carries the command'         'psql'  '"command":"psql"'
+assert_reported 'carries the operator'        'bash'  '"operator":"becky"'
+assert_reported 'carries the reason'          'bash'  '"reason":"testing"'
+# The join key for the api:dyno cross-check, taken from the metadata file rather
+# than from HEROKU_DYNO_ID, which `heroku run -e` can set to anything.
+assert_reported 'carries the trusted dyno id' 'bash'  '"dyno_id":"dyno-uuid-1"'
+assert_reported 'marks the denial enforced'   'bash'  '"enforced":true'
+cg_run_reporting 'bash'
+assert_true 'goes to the configured endpoint' \
+  grep -q "example.invalid/webhooks/console_audit" "$CG_CURL_LOG"
+
+# The wrapper's denials are half of them, and a trail with only the other half
+# would report every argument-policy block as a clean session.
+assert_reported 'a wrapper denial is POSTed too' 'rails "dbconsole"' \
+  '"rule":"raw_database_session"'
+assert_reported 'the wrapper reports post-expansion argv' 'rails "dbconsole"' \
+  '"command":"rails dbconsole"'
+# The identity gate is the denial CI hits, and "who tried to run what" is the
+# whole content of that record.
+cg_env 'CONSOLE_USER='
+assert_reported 'an unidentified session still names the command' 'rails c' \
+  '"rule":"identity_missing"'
+
+# A permitted command is not a denial.
+assert_not_reported 'a permitted command reports nothing' 'rails c'
+
+# Nothing configured means nothing sent -- the state of every app before rollout
+# reaches it.
+: > "$CG_CURL_LOG"
+cg_run 'bash'
+assert_true 'no endpoint configured means no POST' test ! -s "$CG_CURL_LOG"
+
+# The command is judged and recorded without the CLI's marker, so a CI denial
+# record reads as the command the caller wrote.
+assert_reported 'the --exit-code marker is not in the record' \
+  "psql${CG_MARKER}" '"command":"psql"'
+
+# A record has to survive JSON.parse in datadog-proxy, and the command string is
+# operator-controlled: quotes, backslashes, newlines and control characters all
+# have to be escaped or the whole record is unparseable.
+cg_run_reporting $'psql "a\\"b\\\\c" \t\n z'
+assert_true 'the record is valid JSON even with a hostile command' \
+  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_CURL_LOG"
+
+# The endpoint URL carries the Basic credential. curl reports failures by quoting
+# the URL, so its stderr must never reach the operator.
+CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/fail-me"
+cg_run_reporting 'bash'
+if [[ "$CG_OUT" != *"$CG_REPORT_CRED"* && "$CG_OUT" == *"denial not recorded"* ]]; then
+  _cg_report true 'a failed report says so without leaking the credential'
+else
+  _cg_report false 'a failed report says so without leaking the credential' \
+    'expected a "denial not recorded" warning and no credential in it'
+fi
+
+# ============================================================ permit mode records
+# Phase 1 exists to measure what enforcement would block. That is only measurable
+# if the would-be denials are recorded.
+cg_build permit-report CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/permit-report/dyno-metadata.json"
+CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/webhooks/console_audit"
+cg_env_sticky 'CONSOLE_BLOCK_ENFORCE=false'
+assert_reported 'permit mode records the would-be denial' 'bash' '"enforced":false'
+assert_reported 'permit mode records wrapper denials too' 'rails "dbconsole"' \
+  '"enforced":false'
+cg_run_reporting 'bash'
+assert_true 'permit mode still permits the command' test -n "$CG_OUT"
+cg_env_sticky
+
 # ============================================================ compile
 cg_section "bin/compile"
 assert_false 'fails when BUILD_DIR is missing'    "$CG_ROOT/bin/compile"
@@ -460,6 +538,9 @@ assert_true  'installs the profile script' test -f "$CG_APP/.profile.d/zzz_conso
 assert_true  'installs the rails wrapper'   test -x "$CG_APP/.console-guard/bin/rails"
 assert_true  'installs the rake wrapper'    test -x "$CG_APP/.console-guard/bin/rake"
 assert_true  'installs the bundle wrapper'  test -x "$CG_APP/.console-guard/bin/bundle"
+assert_true  'installs the denial reporter' test -f "$CG_APP/.console-guard/lib/denial_report.sh"
+assert_true  'generated denial reporter is valid bash' \
+  bash -n "$CG_APP/.console-guard/lib/denial_report.sh"
 assert_true  'generated bundle wrapper is valid bash' \
   bash -n "$CG_APP/.console-guard/bin/bundle"
 assert_false 'leaves no unsubstituted placeholders' \

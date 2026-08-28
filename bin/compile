@@ -62,6 +62,13 @@ render() {
 
 echo "-----> Installing console guard ${CG_VERSION}"
 
+# Sourced by both halves of the guard, so it belongs beside them rather than in
+# either one. Installed first, before the two scripts that look for it.
+LIB_DIR="$BUILD_DIR/.console-guard/lib"
+mkdir -p "$LIB_DIR"
+render "$BUILDPACK_DIR/guard/denial_report.sh" "$LIB_DIR/denial_report.sh"
+chmod 644 "$LIB_DIR/denial_report.sh"
+
 # Named zzz_ so it loads last, after every other buildpack's profile script.
 # CONSOLE_AUDIT_ENABLED must be the final exported value, and the PATH entry that
 # reaches the command wrapper must not be undone by a later script.
@@ -89,6 +96,7 @@ chmod 755 "$SHIM_DIR/rails" "$SHIM_DIR/rake" "$SHIM_DIR/bundle"
 {
   echo "profile script: .profile.d/zzz_console_guard.sh"
   echo "command wrapper: .console-guard/bin/{rails,rake,bundle}"
+  echo "denial reporter: .console-guard/lib/denial_report.sh"
   echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
   echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"
 } | indent

@@ -42,7 +42,24 @@ fi
 
 _cg_prog="${0##*/}"
 
+# ---------- denial reporting ----------
+# Half the guard's denials happen here rather than in the profile script, and an
+# audit trail that records only the other half is worse than none. A missing
+# library degrades to a no-op: the record is observability, and losing it must
+# not change what the wrapper permits.
+_cg_lib="${HOME:-/app}/.console-guard/lib/denial_report.sh"
+if [[ -r "$_cg_lib" ]]; then
+  # shellcheck source=guard/denial_report.sh
+  . "$_cg_lib"
+else
+  echo "console-guard: denial reporter is missing, denials will not be recorded" >&2
+  _cg_report_denial() { :; }
+fi
+
+# <rule> is a short stable identifier for the check that refused. It is what a
+# monitor groups by, because denial messages get reworded and rule names do not.
 _cg_deny() {
+  local _cg_rule="$1"; shift
   local line
   {
     echo ""
@@ -60,10 +77,21 @@ _cg_deny() {
     echo ""
   } >&2
 
+  # The post-expansion argv, which is what this half actually judged -- the
+  # profile script's copy is the pre-expansion string, and the two differ in
+  # exactly the cases this wrapper exists for.
+  local _cg_enforced=false
+  [[ "$_cg_enforcing" == "true" ]] && _cg_enforced=true
+  _cg_report_denial "$_cg_rule" "$_cg_prog ${_cg_argv_seen[*]:-}" "$_cg_enforced"
+
   if [[ "$_cg_enforcing" == "true" ]]; then
     exit 1
   fi
 }
+
+# Captured before any policy runs, and before `bundle exec` rewriting narrows
+# what policy looks at, so a denial record shows what was invoked.
+_cg_argv_seen=("$@")
 
 # ---------- resolve the real rails/rake ----------
 # PATH still contains this wrapper's directory, so a plain `exec rails` would
@@ -112,7 +140,8 @@ _cg_policy_args=("$@")
 
 if [[ "$_cg_prog" == "bundle" ]]; then
   if [[ "${1:-}" != "exec" ]]; then
-    _cg_deny "\`bundle ${1:-}\` is not permitted on one-off dynos." \
+    _cg_deny bundle_not_exec \
+             "\`bundle ${1:-}\` is not permitted on one-off dynos." \
              "" \
              "Only \`bundle exec rails\` and \`bundle exec rake\` are allowed," \
              "because those are the forms Heroku's Ruby buildpack produces for" \
@@ -126,7 +155,8 @@ if [[ "$_cg_prog" == "bundle" ]]; then
       _cg_policy_prog="$2"
       ;;
     *)
-      _cg_deny "\`bundle exec ${2:-}\` is not permitted on one-off dynos." \
+      _cg_deny bundle_exec_not_allowed \
+               "\`bundle exec ${2:-}\` is not permitted on one-off dynos." \
                "" \
                "Only \`rails\` and \`rake\` may be run under \`bundle exec\`," \
                "and the name must be unqualified."
@@ -144,7 +174,8 @@ _cg_sub="${_cg_policy_args[0]:-}"
 # ever seen by the console audit hook.
 case "$_cg_sub" in
   dbconsole|db)
-    _cg_deny "\`${_cg_policy_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
+    _cg_deny raw_database_session \
+             "\`${_cg_policy_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
              "" \
              "It opens a raw database session, so no statement reaches the" \
              "console audit hook."
@@ -156,7 +187,8 @@ esac
 # profile script also unsets EDITOR and VISUAL; this is the second layer.
 case "$_cg_sub" in
   credentials:*|encrypted:*)
-    _cg_deny "\`${_cg_policy_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
+    _cg_deny editor_escape \
+             "\`${_cg_policy_prog} ${_cg_sub}\` is not permitted on one-off dynos." \
              "" \
              "These commands spawn an editor, which is a shell escape."
     ;;
@@ -167,7 +199,8 @@ for _cg_arg in ${_cg_policy_args[@]+"${_cg_policy_args[@]}"}; do
   # that runs appears in no log at all -- not the dyno command string, not the
   # api:dyno webhook, not an in-app ARGV capture.
   if [[ "$_cg_arg" == "-" ]]; then
-    _cg_deny "Reading the program from stdin is not permitted." \
+    _cg_deny stdin_program \
+             "Reading the program from stdin is not permitted." \
              "" \
              "A bare \`-\` argument means the executed code never appears in" \
              "any audit record. Pass the code inline instead."
@@ -177,7 +210,8 @@ for _cg_arg in ${_cg_policy_args[@]+"${_cg_policy_args[@]}"}; do
   # invocation uses it. `rails c` -- the console shorthand -- is unaffected,
   # because that argument is `c`, not `-c`.
   if [[ "$_cg_arg" == "-c" ]]; then
-    _cg_deny "The \`-c\` flag is not permitted on one-off dynos." \
+    _cg_deny dash_c_flag \
+             "The \`-c\` flag is not permitted on one-off dynos." \
              "" \
              "Use \`rails c\` for a console."
   fi
@@ -205,7 +239,8 @@ if [[ "$_cg_policy_prog" == "rails" && ( "$_cg_sub" == "console" || "$_cg_sub" =
   for _cg_arg in "${_cg_policy_args[@]:1}"; do
     case "$_cg_arg" in
       --sandbox|--sandbox=*|-s|-s=*)
-        _cg_deny "\`rails ${_cg_sub} ${_cg_arg}\` is not permitted on one-off dynos." \
+        _cg_deny sandbox_console \
+                 "\`rails ${_cg_sub} ${_cg_arg}\` is not permitted on one-off dynos." \
                  "" \
                  "A sandboxed console rolls back its transaction on exit, which" \
                  "discards the queued audit records with it -- the session would" \
@@ -228,13 +263,15 @@ if [[ "$_cg_policy_prog" == "rails" && ( "$_cg_sub" == "runner" || "$_cg_sub" ==
   for _cg_arg in "${_cg_policy_args[@]:1}"; do
     case "$_cg_arg" in
       --file|--file=*)
-        _cg_deny "\`rails runner\` may not read its program from a file." \
+        _cg_deny runner_file \
+                 "\`rails runner\` may not read its program from a file." \
                  "" \
                  "Pass the code inline instead."
         ;;
     esac
     if [[ -f "$_cg_arg" ]]; then
-      _cg_deny "\`rails runner\` may not read its program from a file." \
+      _cg_deny runner_file \
+               "\`rails runner\` may not read its program from a file." \
                "" \
                "\`${_cg_arg}\` exists on disk, so Rails would execute the" \
                "file rather than the argument. The command string would then" \

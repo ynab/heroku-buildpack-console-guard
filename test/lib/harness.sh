@@ -80,6 +80,29 @@ EOF
     chmod 755 "$base/fakebin/$fake"
   done
 
+  # A fake `curl`, so a test can see the denial record the guard POSTs without a
+  # network. Records the request body and the URL it was given. Answers 202 --
+  # the real endpoint's success code -- unless the URL says to fail, which is how
+  # the "a failed report never leaks the credential" test is arranged.
+  CG_CURL_LOG="$base/curl.log"
+  : > "$CG_CURL_LOG"
+  cat > "$base/fakebin/curl" <<EOF
+#!/usr/bin/env bash
+_prev=""
+for _a in "\$@"; do
+  case "\$_prev" in
+    --data-binary) printf 'BODY %s\n' "\$_a" >> "$CG_CURL_LOG" ;;
+  esac
+  _prev="\$_a"
+done
+printf 'ARGV %s\n' "\$*" >> "$CG_CURL_LOG"
+case "\$*" in
+  *fail-me*) exit 7 ;;
+esac
+printf '202'
+EOF
+  chmod 755 "$base/fakebin/curl"
+
   # Stand in for Heroku's own .profile.
   cat > "$CG_APP/.profile" <<EOF
 # Every non-interactive bash inherits BASH_ENV, so without this the fake
@@ -244,6 +267,54 @@ assert_no_output() {
   else
     _cg_report false "$label" "expected output NOT to contain '$unexpected'"
   fi
+}
+
+# ------------------------------------------------- denial records
+
+# The URL the guard is given for these tests. The credential is in it, as it is
+# in the real config var, so that a test can prove it never reaches the operator.
+# shellcheck disable=SC2034  # read by run_tests.sh
+CG_REPORT_CRED="s3cr3t-not-for-operators"
+CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/webhooks/console_audit"
+
+# cg_reported_bodies -- the request bodies seen since the last cg_run.
+cg_reported_bodies() { sed -n 's/^BODY //p' "$CG_CURL_LOG"; }
+
+# cg_run_reporting <payload> -- as cg_run, with the endpoint configured and the
+# request log cleared first.
+cg_run_reporting() {
+  : > "$CG_CURL_LOG"
+  # shellcheck disable=SC2086  # deliberate word splitting: keep any cg_env values
+  cg_env "CONSOLE_LOGGING_DATADOG_PROXY_URL=$CG_REPORT_URL" $CG_CURRENT_ENV
+  cg_run "$1"
+}
+
+# assert_reported <label> <payload> <substring the record must contain>
+assert_reported() {
+  local label="$1" payload="$2" expect="$3" bodies
+  cg_run_reporting "$payload"
+  bodies="$(cg_reported_bodies)"
+  if [[ -z "$bodies" ]]; then
+    _cg_report false "$label" "no denial record was POSTed"
+    return
+  fi
+  if [[ "$bodies" != *"$expect"* ]]; then
+    _cg_report false "$label" "record did not contain '$expect'; got: $bodies"
+    return
+  fi
+  _cg_report true "$label"
+}
+
+# assert_not_reported <label> <payload>
+assert_not_reported() {
+  local label="$1" payload="$2" bodies
+  cg_run_reporting "$payload"
+  bodies="$(cg_reported_bodies)"
+  if [[ -n "$bodies" ]]; then
+    _cg_report false "$label" "a denial record was POSTed: $bodies"
+    return
+  fi
+  _cg_report true "$label"
 }
 
 # assert_true <label> <command...> -- generic assertion for build-time checks

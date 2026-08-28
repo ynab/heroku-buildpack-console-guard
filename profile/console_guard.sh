@@ -34,6 +34,19 @@
 _CG_VERSION="@@CG_VERSION@@"
 _cg_metadata_file="@@CG_DYNO_METADATA_FILE@@"
 _cg_shim_dir="${HOME:-/app}/.console-guard/bin"
+_cg_lib_dir="${HOME:-/app}/.console-guard/lib"
+
+# ---------- denial reporting ----------
+# Sourced before the first check, because the $DYNO-spoof refusal below is one of
+# the denials worth recording. A missing library degrades to a no-op: the record
+# is observability, and losing it must not change what the guard permits.
+if [[ -r "$_cg_lib_dir/denial_report.sh" ]]; then
+  # shellcheck source=guard/denial_report.sh
+  . "$_cg_lib_dir/denial_report.sh"
+else
+  echo "console-guard: denial reporter is missing, denials will not be recorded" >&2
+  _cg_report_denial() { :; }
+fi
 
 # ---------- enforcement mode (phase 1 rollout) ----------
 # Phase 1 permits but does not block: every check still runs and reports, but a
@@ -87,6 +100,11 @@ if [[ -r "$_cg_metadata_file" ]]; then
         echo "=========================================="
         echo ""
       } >&2
+      # Recorded with the metadata's dyno id, not $DYNO's, so the record files
+      # under the dyno this actually is.
+      CONSOLE_GUARD_DYNO_ID="${_cg_meta_id:-}" \
+        _cg_report_denial dyno_name_spoofed "\$DYNO=${DYNO}" true
+
       # Fatal in both enforcement modes. This is not a command-policy decision an
       # operator can be warned about; it is an attempt to change which dyno the
       # guard believes it is running on.
@@ -123,9 +141,21 @@ if [[ "$_cg_gated" != "true" ]]; then
   if [[ "$_cg_audited" == "true" ]]; then
     export CONSOLE_AUDIT_ENABLED=true
   fi
-  unset _cg_enforcing _CG_VERSION _cg_metadata_file _cg_shim_dir \
-        _cg_dyno_name _cg_dyno_id _cg_metadata_seen _cg_gated _cg_audited
+  unset -f _cg_report_denial _cg_json_escape _cg_json_field \
+           _cg_report_truncate 2>/dev/null
+  unset _cg_enforcing _CG_VERSION _cg_metadata_file _cg_shim_dir _cg_lib_dir \
+        _cg_dyno_name _cg_dyno_id _cg_metadata_seen _cg_gated _cg_audited \
+        _CG_REPORT_VERSION _CG_REPORT_URL_VAR _CG_REPORT_EVENT \
+        _CG_REPORT_CONNECT_TIMEOUT _CG_REPORT_MAX_TIME _CG_REPORT_CMD_MAX
   return 0
+fi
+
+# The trusted dyno id, for the command wrapper's own denial records: it is
+# resolved from the metadata file above, which `heroku run -e` cannot reach,
+# whereas HEROKU_DYNO_ID can be set to anything. Exported here rather than
+# earlier so it appears only on the dynos the wrapper is installed for.
+if [[ -n "$_cg_dyno_id" ]]; then
+  export CONSOLE_GUARD_DYNO_ID="$_cg_dyno_id"
 fi
 
 # ---------- the CLI's exit-status marker ----------
@@ -168,8 +198,66 @@ for _cg_arg in "${_cg_argv[@]}"; do
   fi
 done
 
+# ---------- extract the dyno command ----------
+# Heroku executes the one-off command through a login shell, which is the process
+# that sources this script, so its argv is `bash -c <the dyno command>` and we
+# want the payload.
+#
+# Extracted here, before the first check, so that every denial record carries the
+# command -- including the identity denial, which is the one CI hits and the one
+# where "what did they try to run" matters most. The refusals for an argv this
+# cannot read stay further down, where they were, so denial precedence is
+# unchanged.
+_CG_DYNO_CMD=""
+_cg_cmd_read=false
+
+if (( ${#_cg_argv[@]} > 0 )); then
+  case "${_cg_argv[0]##*/}" in
+    bash|sh|zsh|dash)
+      _cg_i=1
+      while (( _cg_i < ${#_cg_argv[@]} )); do
+        # Match `-c` and also combined short forms such as `-lc`, which mean the
+        # same thing to the shell.
+        case "${_cg_argv[_cg_i]}" in
+          -c|-[!-]*c)
+            _CG_DYNO_CMD="${_cg_argv[_cg_i + 1]:-}"
+            _cg_cmd_read=true
+            break
+            ;;
+        esac
+        (( _cg_i++ ))
+      done
+      ;;
+  esac
+fi
+
+# ---------- strip the CLI's exit-status marker ----------
+# Removed before anything vets or reports the command, so `heroku run --exit-code
+# rake foo` is judged -- and recorded -- as `rake foo` rather than as the compound
+# the CLI made of it. See the marker definition above for why dropping
+# --exit-code is not an option.
+#
+# Exact literal, anchored to the end, removed at most once. A looser pattern is a
+# shell escape: `rails c ; bash # heroku-command-exit-status` would be stripped
+# back to `rails c` and permitted. Two markers leave one behind, which the
+# compound check then rejects.
+#
+# If Heroku changes the marker this stops matching and CI is denied again --
+# noisy, but the safe direction to fail in.
+if [[ "$_cg_cmd_read" == "true" ]]; then
+  _cg_candidate="${_CG_DYNO_CMD%"${_CG_DYNO_CMD##*[![:space:]]}"}"
+  if [[ "$_cg_candidate" == *"$_CG_EXIT_MARKER" ]]; then
+    _cg_candidate="${_cg_candidate%"$_CG_EXIT_MARKER"}"
+    _CG_DYNO_CMD="${_cg_candidate%"${_cg_candidate##*[![:space:]]}"}"
+  fi
+fi
+
 # Print a denial. Exits the dyno when enforcing; warns and continues otherwise.
+#
+# <rule> is a short stable identifier for the check that refused. It is what a
+# monitor groups by, because denial messages get reworded and rule names do not.
 _cg_deny() {
+  local _cg_rule="$1"; shift
   local _cg_line
   {
     echo ""
@@ -186,6 +274,13 @@ _cg_deny() {
     echo "=========================================="
     echo ""
   } >&2
+
+  # Before the exit, and in permit mode too: phase 1 exists to measure what
+  # enforcement would block, which is only measurable if the would-be denials
+  # are recorded.
+  local _cg_enforced=false
+  [[ "$_cg_enforcing" == "true" ]] && _cg_enforced=true
+  _cg_report_denial "$_cg_rule" "${_CG_DYNO_CMD:-${_cg_argv[*]:-}}" "$_cg_enforced"
 
   if [[ "$_cg_enforcing" == "true" ]]; then
     # Stand in for the `echo` the CLI appended, which exiting here skips. On
@@ -206,7 +301,8 @@ _CG_USAGE='heroku run -e "CONSOLE_USER=$(heroku whoami);CONSOLE_REASON=test" rai
 # enforce anything meaningful, so refuse rather than run half a gate.
 if [[ ! -x "$_cg_shim_dir/rails" || ! -x "$_cg_shim_dir/rake" ||
       ! -x "$_cg_shim_dir/bundle" ]]; then
-  _cg_deny "The console guard command wrapper is missing from this dyno." \
+  _cg_deny wrapper_missing \
+           "The console guard command wrapper is missing from this dyno." \
            "" \
            "Expected: ${_cg_shim_dir}/{rails,rake,bundle}" \
            "" \
@@ -232,7 +328,8 @@ if (( ${#_cg_missing[@]} > 0 )); then
   else
     _cg_missing_desc="${_cg_missing[0]} is"
   fi
-  _cg_deny "${_cg_missing_desc} not set." \
+  _cg_deny identity_missing \
+           "${_cg_missing_desc} not set." \
            "" \
            "Both are required on one-off dynos. CONSOLE_USER must be your" \
            "\`heroku whoami\` value, so that console records can be compared" \
@@ -261,11 +358,10 @@ if [[ "$_cg_enforcing" != "true" && -z "${_cg_user_check//[[:space:]]/}" ]]; the
   export CONSOLE_USER="[not provided]"
 fi
 
-# ---------- determine the dyno command ----------
-# Heroku executes the one-off command through a login shell, which is the process
-# that sources this script. Its argv is therefore `bash -c <the dyno command>`;
-# we want the payload, not the wrapper. `_cg_argv` was read above, where the
-# exit-status marker check needed it.
+# ---------- refuse an argv the gate cannot read ----------
+# The extraction itself happened above, before the first check. What is left here
+# is the pair of refusals for the shapes it could not handle, kept in this
+# position so that the identity gate above still takes precedence.
 
 # Denials echo the command back. Without it a denial cannot be diagnosed from the
 # operator's side -- "this command is not permitted" says nothing about which
@@ -280,42 +376,23 @@ _cg_show() {
   fi
 }
 
-_CG_DYNO_CMD=""
-_cg_cmd_read=false
-
 if (( ${#_cg_argv[@]} == 0 )); then
   # Fail closed: if we cannot read the command, we cannot vet it.
-  _cg_deny "Could not read the dyno command." \
+  _cg_deny command_unreadable \
+           "Could not read the dyno command." \
            "" \
            "/proc/\$\$/cmdline is empty or unreadable, and the console gate" \
            "cannot vet a command it cannot see, so the session is refused." \
            "" \
            "This is a platform or build problem, not an operator mistake."
 else
-  case "${_cg_argv[0]##*/}" in
-    bash|sh|zsh|dash)
-      _cg_i=1
-      while (( _cg_i < ${#_cg_argv[@]} )); do
-        # Match `-c` and also combined short forms such as `-lc`, which mean the
-        # same thing to the shell.
-        case "${_cg_argv[_cg_i]}" in
-          -c|-[!-]*c)
-            _CG_DYNO_CMD="${_cg_argv[_cg_i + 1]:-}"
-            _cg_cmd_read=true
-            break
-            ;;
-        esac
-        (( _cg_i++ ))
-      done
-      ;;
-  esac
-
   # No `-c` payload means this is not the `bash -c <command>` shape the gate is
   # built on: the login shell was invoked some other way, or the command arrives
   # on stdin. There is no command string to vet, so refuse -- and say so.
   if [[ "$_cg_cmd_read" != "true" || -z "${_CG_DYNO_CMD//[[:space:]]/}" ]]; then
     _cg_cmd_read=false
-    _cg_deny "Could not determine the dyno command." \
+    _cg_deny command_not_bash_c \
+             "Could not determine the dyno command." \
              "" \
              "The gate expects this session's login shell to have been invoked" \
              "as \`bash -c <command>\`. It was not, so there is no command" \
@@ -325,26 +402,6 @@ else
              "  $(_cg_show "${_cg_argv[*]}")" \
              "" \
              "This is a platform or build problem, not an operator mistake."
-  fi
-fi
-
-# ---------- strip the CLI's exit-status marker ----------
-# Removed before vetting, so `heroku run --exit-code rake foo` is judged on
-# `rake foo` rather than on the compound the CLI made of it. See the marker
-# definition near the top for why dropping --exit-code is not an option.
-#
-# Exact literal, anchored to the end, removed at most once. A looser pattern is a
-# shell escape: `rails c ; bash # heroku-command-exit-status` would be stripped
-# back to `rails c` and permitted. Two markers leave one behind, which the
-# compound check then rejects.
-#
-# If Heroku changes the marker this stops matching and CI is denied again --
-# noisy, but the safe direction to fail in.
-if [[ "$_cg_cmd_read" == "true" ]]; then
-  _cg_candidate="${_CG_DYNO_CMD%"${_CG_DYNO_CMD##*[![:space:]]}"}"
-  if [[ "$_cg_candidate" == *"$_CG_EXIT_MARKER" ]]; then
-    _cg_candidate="${_cg_candidate%"$_CG_EXIT_MARKER"}"
-    _CG_DYNO_CMD="${_cg_candidate%"${_cg_candidate##*[![:space:]]}"}"
   fi
 fi
 
@@ -367,7 +424,8 @@ if [[ "$_cg_cmd_read" == "true" ]] &&
       "$_CG_DYNO_CMD" == *'<'*   ||
       "$_CG_DYNO_CMD" == *'>'*   ||
       "$_CG_DYNO_CMD" == *$'\n'* ]]; then
-  _cg_deny "Compound statements and redirections are not permitted on one-off" \
+  _cg_deny compound_statement \
+           "Compound statements and redirections are not permitted on one-off" \
            "dynos." \
            "" \
            "The command may not contain any of:  ;  &  |  \`  \$(  <  >  newline" \
@@ -408,7 +466,8 @@ if [[ "$_cg_cmd_read" == "true" ]]; then
   case "$_cg_bin" in
     rails|rake|bundle) : ;;
     *)
-      _cg_deny "This command is not permitted on one-off dynos." \
+      _cg_deny command_not_allowed \
+               "This command is not permitted on one-off dynos." \
                "" \
                "Command:" \
                "  $(_cg_show "$_CG_DYNO_CMD")" \
@@ -466,8 +525,14 @@ export CONSOLE_AUDIT_ENABLED=true
 
 # This script is sourced, so clean up after ourselves rather than leaking state
 # into the console session.
-unset -f _cg_deny _cg_show
-unset _cg_enforcing _CG_VERSION _cg_metadata_file _cg_shim_dir _cg_dyno_name \
-      _cg_dyno_id _cg_metadata_seen _cg_gated _cg_audited _cg_user_check \
-      _cg_reason_check _cg_missing _cg_missing_desc _cg_argv _cg_arg _cg_i \
-      _cg_tokens _cg_bin _cg_cmd_read _CG_DYNO_CMD _CG_USAGE
+#
+# The command wrapper sources the denial reporter itself, so nothing here needs
+# to survive for it -- and CONSOLE_GUARD_DYNO_ID, which does, is exported.
+unset -f _cg_deny _cg_show _cg_report_denial _cg_json_escape _cg_json_field \
+         _cg_report_truncate
+unset _cg_enforcing _CG_VERSION _cg_metadata_file _cg_shim_dir _cg_lib_dir \
+      _cg_dyno_name _cg_dyno_id _cg_metadata_seen _cg_gated _cg_audited \
+      _cg_user_check _cg_reason_check _cg_missing _cg_missing_desc _cg_argv \
+      _cg_arg _cg_i _cg_tokens _cg_bin _cg_cmd_read _CG_DYNO_CMD _CG_USAGE \
+      _CG_REPORT_VERSION _CG_REPORT_URL_VAR _CG_REPORT_EVENT \
+      _CG_REPORT_CONNECT_TIMEOUT _CG_REPORT_MAX_TIME _CG_REPORT_CMD_MAX

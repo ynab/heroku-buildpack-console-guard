@@ -274,6 +274,62 @@ names the first word it rejected. An operator's screenshot is then enough to tel
 objected to the command that was typed or to something else — a wrapper, a prefix, or a shape the
 parser does not handle. Long commands are truncated at 300 characters.
 
+### Denials are recorded, not just printed
+
+That banner reaches only the operator's terminal, over the rendezvous connection. It is not in the
+app's log stream and it never reaches Datadog. Left there, the only durable trace of a blocked
+command is Heroku's own `api:dyno` record — which shows that *something* was attempted but cannot
+distinguish a guard denial from an application error, and forces the audit cross-check to read "no
+console record for this dyno" as "blocked, or lost".
+
+So each denial also POSTs one record, to the same endpoint and with the same credential as the
+companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the two apart:
+
+```json
+{
+  "event": "command_denied",
+  "enforced": true,
+  "rule": "command_not_allowed",
+  "command": "psql",
+  "operator": "becky@example.com",
+  "reason": "checking a migration",
+  "dyno_id": "b922dfe5-0ede-45c8-a267-78bff7a23481",
+  "guard_version": "7f1e0d8",
+  "timestamp": "2026-08-28T06:24:43.000Z"
+}
+```
+
+- **`rule`** is a short stable identifier for the check that refused — group a monitor by this rather
+  than by the denial text, which gets reworded. Current values: `dyno_name_spoofed`,
+  `wrapper_missing`, `identity_missing`, `command_unreadable`, `command_not_bash_c`,
+  `compound_statement`, `command_not_allowed`, `bundle_not_exec`, `bundle_exec_not_allowed`,
+  `raw_database_session`, `editor_escape`, `stdin_program`, `dash_c_flag`, `sandbox_console`,
+  `runner_file`.
+- **`enforced`** is `false` in [permit mode](#phased-rollout). Phase 1 exists to measure what
+  enforcement would block, and that is only measurable if the would-be denials are recorded, so they
+  are sent in both modes.
+- **`command`** is what that half of the guard judged: the pre-expansion command string from the
+  profile script, the post-expansion argv from the command wrapper. The CLI's `--exit-code` marker
+  is stripped first, so a CI denial records the command the caller wrote.
+- **`dyno_id`** comes from the dyno metadata file, not from `HEROKU_DYNO_ID`, which `-e` can set to
+  anything. It is the join key against the `api:dyno` webhook.
+- No `service` / `env` / `app` fields. The gem sends those but stamps them on the **worker**, because
+  `heroku run -e` can rewrite every one of them and a record tagged `env:staging` would keep flowing
+  to Datadog while dropping quietly out of a production-scoped monitor. This runs inside the one-off
+  dyno, where that defence is not available, so it sends none of them and lets the proxy attribute
+  the record from the credential it was authenticated with.
+
+Reporting is **fail-open and best effort**: one attempt, a 4-second ceiling, no retry, and a failure
+warns on stderr without holding up the denial. Refusing the command is the control; recording it must
+not be able to block that. A failure is reported as a status code — never as the URL, which carries
+the credential.
+
+It is also **not sufficient on its own.** The URL variable is inherited by the one-off dyno, so an
+operator who knows about this can suppress their own denial record with
+`heroku run -e CONSOLE_LOGGING_DATADOG_PROXY_URL=`. What survives that is the `api:dyno` webhook and
+the exit status. Closing it properly needs the record to originate somewhere the operator cannot
+reach, which a buildpack cannot be.
+
 ## Setup
 
 Add the buildpack to a Heroku app alongside its existing buildpacks, **pinned to a commit SHA**:
@@ -300,6 +356,7 @@ records the installed version:
 -----> Installing console guard 7f1e0d8
        profile script: .profile.d/zzz_console_guard.sh
        command wrapper: .console-guard/bin/{rails,rake,bundle}
+       denial reporter: .console-guard/lib/denial_report.sh
        dyno metadata file: /etc/heroku/dyno
        enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time
 ```
@@ -332,8 +389,8 @@ records the installed version:
 
 ## Companion gem
 
-The buildpack blocks commands and exports `CONSOLE_AUDIT_ENABLED=true`; it does not record anything
-itself. Recording console statements is done in-app by
+The buildpack blocks commands and exports `CONSOLE_AUDIT_ENABLED=true`; the only thing it records
+itself is [its own denials](#denials-are-recorded-not-just-printed). Recording console statements is done in-app by
 [console1984-datadog](https://github.com/ynab/console1984-datadog), which activates when
 `CONSOLE_AUDIT_ENABLED` is set. See that repository for what it records and how to configure it.
 
@@ -408,6 +465,7 @@ Set as a config var on the app, and read at **run** time:
 | Variable | Required | Notes |
 |---|---|---|
 | `CONSOLE_BLOCK_ENFORCE` | No | `false` opts into phase 1 permit mode. Defaults to enforcing, and only the exact value `false` opts out. Temporary: removed at the end of phase 1, and until then not tamper-proof |
+| `CONSOLE_LOGGING_DATADOG_PROXY_URL` | No | Where to POST a [denial record](#denials-are-recorded-not-just-printed). Same variable, endpoint and Basic credential as the companion gem. Unset means denials are not recorded. Read on the one-off dyno, so `-e` can suppress it |
 
 Set as a config var on the app, and read at **build** time:
 
@@ -421,6 +479,7 @@ Set by the buildpack itself:
 | Variable | Value | Notes |
 |---|---|---|
 | `CONSOLE_AUDIT_ENABLED` | `true` | Exported on `run`, `scheduler` and `release` dynos, in both enforcement modes. Activates the audit hook in the companion gem. Because `.profile.d` scripts run *after* config vars and `-e` vars are applied, an operator cannot disable it via `-e`. In local and development environments, where this buildpack does not run, set it manually to opt in |
+| `CONSOLE_GUARD_DYNO_ID` | dyno UUID | Exported on gated dynos only, from the dyno metadata file, so the command wrapper's denial records carry a join key `-e` cannot forge. Empty when metadata is disabled |
 | `PATH` | prepended | With `.console-guard/bin`, so `rails`, `rake` and `bundle` resolve to the command wrapper |
 | `EDITOR`, `VISUAL` | unset | They are a shell escape via `rails credentials:edit` |
 
@@ -501,6 +560,13 @@ reach models or the database.
 
 **`CONSOLE_USER` is self-reported** and is not verified by the buildpack. Heroku's own audit trail
 (`heroku access -a app_name`) is the authoritative record of who started a session.
+
+**A denial record can be suppressed by the operator it is about.** The endpoint is read from
+`CONSOLE_LOGGING_DATADOG_PROXY_URL`, which a one-off dyno inherits, so `-e` on that variable stops
+the POST. The gem does not have this problem because its *worker* reads the variable, out of the
+operator's reach; nothing running inside the dyno can borrow that defence. Suppression leaves the
+`api:dyno` webhook and the exit status, so the attempt is still visible — just not identifiable as a
+guard denial. Treat the record as evidence of what was blocked, not as proof that nothing was.
 
 **Statements executed after the audit path is disabled are not recorded.** A statement that disables
 auditing is itself recorded if the gem logs before execution, but statements after it are not.
