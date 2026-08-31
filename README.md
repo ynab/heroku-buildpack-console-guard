@@ -327,6 +327,14 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
 - No `service` / `env` / `version`. Nothing needs them for scoping, and `datadog-proxy` derives the
   service from the credential, which is the half an operator cannot forge.
 
+Every string in the record is escaped to **pure ASCII**, and any byte `>= 0x80` is replaced with
+U+FFFD. A JSON string has to be valid UTF-8, and both `command` and `reason` are operator-controlled
+bytes, so one stray byte would otherwise cost the whole record — `rule`, `operator` and `dyno_id`
+along with it — and cost it invisibly, since the only warning goes to the terminal of the operator
+who was just blocked. The price is fidelity: `rails runner "puts 'héllo'"` records two replacement
+characters where the `é` was. Enough to see that something non-ASCII was there, which is all the
+`command` field is for.
+
 Reporting is **fail-open and best effort**: one attempt, a 4-second ceiling, no retry, and a failure
 warns on stderr without holding up the denial. Refusing the command is the control; recording it must
 not be able to block that. A failure is reported as a status code — never as the URL, which carries

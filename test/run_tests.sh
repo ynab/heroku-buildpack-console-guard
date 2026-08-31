@@ -522,6 +522,21 @@ cg_run_reporting $'psql "a\\"b\\\\c" \t\n z'
 assert_true 'the record is valid JSON even with a hostile command' \
   perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_CURL_LOG"
 
+# ...and a JSON string has to be valid UTF-8, so a command carrying bytes that
+# are not would cost the whole record -- rule, operator and dyno_id with it.
+cg_run_reporting $'psql \xc3\xa9 \x8b \xff'
+assert_true 'the record is valid JSON even with invalid UTF-8 in the command' \
+  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_CURL_LOG"
+assert_true 'the record is pure ASCII, whatever bytes went in' \
+  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$CG_CURL_LOG"
+assert_reported 'a non-ASCII byte is recorded as U+FFFD' \
+  $'psql \xc3\xa9' '"command":"psql \ufffd\ufffd"'
+# The reason is operator-controlled too, and unlike the command it is not vetted
+# by anything upstream. No space in the value: cg_env word-splits.
+cg_env $'CONSOLE_REASON=caf\xc3\xa9-\x8b'
+assert_reported 'and so is one in the reason' 'psql' \
+  '"reason":"caf\ufffd\ufffd-\ufffd"'
+
 # The endpoint URL carries the Basic credential. curl reports failures by quoting
 # the URL, so its stderr must never reach the operator.
 CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/fail-me"

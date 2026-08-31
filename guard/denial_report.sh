@@ -60,27 +60,39 @@ _CG_REPORT_CMD_MAX=300
 
 # JSON-escape a string onto stdout, without the surrounding quotes.
 #
-# Byte-wise on purpose. A one-off dyno runs in the C locale, so `${s:i:1}` walks
-# bytes; a multi-byte character's bytes are each >= 0x80, fall through to the
-# default arm untouched, and are reassembled by concatenation. That keeps the
-# U+FFFF the CLI's --exit-code marker carries intact instead of mangling it.
+# Backslash first, or it would double the ones the later rules introduce.
+#
+# The loop terminates: each pass replaces every occurrence of one control byte
+# with a \u escape containing none, so the set of remaining ones strictly
+# shrinks. It runs at most 33 times, and for a real command, zero.
+#
+# The output is pure ASCII, which is the point: a JSON string has to be valid
+# UTF-8, and both the command and the reason are operator-controlled bytes. One
+# stray byte would cost the entire record -- rule, operator and dyno_id with it
+# -- and it would be lost where nobody auditing can see it, because the only
+# warning goes to the terminal of the operator who was just blocked.
+#
+# The cost is fidelity: every byte >= 0x80 reads as U+FFFD, so `puts 'héllo'` is
+# recorded with two of them, and the leftover sentinel in the two-marker case
+# reads as three. Enough to see that something non-ASCII was there.
 _cg_json_escape() {
-  local _s="$1" _out="" _i _c
-  for (( _i = 0; _i < ${#_s}; _i++ )); do
-    _c="${_s:_i:1}"
-    case "$_c" in
-      '"')   _out+='\"' ;;
-      $'\\') _out+=$'\\\\' ;;
-      $'\n') _out+='\n' ;;
-      $'\r') _out+='\r' ;;
-      $'\t') _out+='\t' ;;
-      # The rest of the C0 controls have no short form and are illegal raw in a
-      # JSON string, so they would make the whole record unparseable.
-      [[:cntrl:]]) _out+="$(printf '\\u%04x' "'$_c")" ;;
-      *)     _out+="$_c" ;;
-    esac
+  local _s="$1" _c
+  _s="${_s//\\/\\\\}"
+  _s="${_s//\"/\\\"}"
+  _s="${_s//$'\n'/\\n}"
+  _s="${_s//$'\r'/\\r}"
+  _s="${_s//$'\t'/\\t}"
+  # Before the loop below, so [[:cntrl:]] cannot reach a high byte in a locale
+  # that counts 0x80-0x9f as controls. Written as an escape, not a literal, to
+  # keep the body ASCII.
+  _s="${_s//[$'\x80'-$'\xff']/\\ufffd}"
+  # The remaining C0 controls have no short form and are illegal raw in a JSON
+  # string, so they would make the whole record unparseable.
+  while [[ "$_s" =~ [[:cntrl:]] ]]; do
+    _c="${BASH_REMATCH[0]}"
+    _s="${_s//"$_c"/$(printf '\\u%04x' "'$_c")}"
   done
-  printf '%s' "$_out"
+  printf '%s' "$_s"
 }
 
 # _cg_json_field <name> <value> -- emits `,"name":"value"`, or nothing when the
