@@ -205,8 +205,114 @@ cg_env 'S=--sandbox'            ; assert_blocked 'rails c $S'           'unlogge
 # direction. Neither is collateral damage.
 assert_ran 'rake -s some:task'
 assert_ran 'rails c --no-sandbox'
-assert_ran 'rails runner -s'
 assert_ran 'rails c'
+
+cg_section "rake evaluates code in its own option parser"
+# -e/-p/-E eval and exit inside rake's option parser, before the Rakefile is
+# loaded, so nothing boots and the audit hook records nothing at all.
+assert_blocked 'rake -e 1'                     'allowlisted'
+assert_blocked 'rake --execute 1'              'allowlisted'
+assert_blocked 'rake -p 1+1'                   'allowlisted'
+assert_blocked 'rake -E 1'                     'allowlisted'
+assert_blocked 'rake --execute-print 1'        'allowlisted'
+assert_blocked 'rake --execute-continue 1'     'allowlisted'
+assert_blocked 'rake "--execute=1"'            'allowlisted'
+assert_blocked 'bundle exec rake -e 1'         'allowlisted'
+cg_env 'P=-e' ; assert_blocked 'rake $P 1'     'allowlisted'
+# Short options bundle in rake, so the allowlist matches whole tokens: `-s` is
+# permitted but `-se` is a different token and is refused.
+assert_blocked 'rake -Ne 1'                    'allowlisted'
+assert_blocked 'rake -se 1'                    'allowlisted'
+assert_blocked 'rake -qsNe 1'                  'allowlisted'
+# ...which also means a bundle of two permitted flags is refused. Cheap: -s -q.
+assert_blocked 'rake -sq some:task'            'matched whole'
+# Abbreviated long forms, which rake accepts and the allowlist does not.
+assert_blocked 'rake --exec 1'                 'allowlisted'
+assert_blocked 'rake --ex 1'                   'allowlisted'
+assert_blocked 'rake --task'                   'allowlisted'
+# Options that name a path rather than the code that runs.
+assert_blocked 'rake -f Rakefile some:task'    'allowlisted'
+assert_blocked 'rake -r ./payload some:task'   'allowlisted'
+assert_blocked 'rake -I /app some:task'        'allowlisted'
+assert_blocked 'rake -R /app some:task'        'allowlisted'
+assert_blocked 'rake -C /app some:task'        'allowlisted'
+assert_blocked 'rake --require ./payload'      'allowlisted'
+assert_blocked 'rake --rakefile Rakefile'      'allowlisted'
+# `--system` loads tasks from $HOME/.rake, and $HOME is /app on a dyno. The
+# allowlist refuses these without anyone having had to think of them.
+assert_blocked 'rake -g some:task'             'allowlisted'
+assert_blocked 'rake -G some:task'             'allowlisted'
+assert_blocked 'rake -N some:task'             'allowlisted'
+assert_blocked 'rake --system some:task'       'allowlisted'
+assert_blocked 'rake --suppress-backtrace x'   'allowlisted'
+assert_blocked 'rake --no-such-option'         'allowlisted'
+# Rails hands a command it does not recognise to rake's option parser, argv and
+# all, so the same options arrive by way of `rails`.
+assert_blocked 'rails -e 1'                    'allowlisted'
+assert_blocked 'rails db:migrate -e 1'         'allowlisted'
+assert_blocked 'bundle exec rails -e 1'        'allowlisted'
+# The denial names what is permitted, so a false positive is self-service.
+assert_output 'the denial lists the permitted options' \
+  'rake --no-such-option' '--tasks'
+assert_output 'the denial names the command it applies to' \
+  'rails db:migrate --no-such-option' 'Permitted after `rails db:migrate`'
+
+cg_section "the permitted rake options still work"
+assert_ran 'rake -T'                    'rake -T'
+assert_ran 'rake -T db'
+assert_ran 'rake -Tdb'                  'rake -Tdb'
+assert_ran 'rake "--tasks=db"'
+assert_ran 'rake -D db'
+assert_ran 'rake -W some:task'
+assert_ran 'rake -P'
+assert_ran 'rake -s some:task'
+assert_ran 'rake -q some:task'
+assert_ran 'rake -n some:task'
+assert_ran 'rake -t some:task'
+assert_ran 'rake -v some:task'
+assert_ran 'rake -V'
+assert_ran 'rake -A -T'
+assert_ran 'rake -B some:task'
+assert_ran 'rake -m some:task'
+assert_ran 'rake -j 4 some:task'
+assert_ran 'rake -j4 some:task'
+assert_ran 'rake -X some:task'
+assert_ran 'rake --trace some:task'     'rake --trace some:task'
+assert_ran 'rake "--trace=stderr" some:task'
+assert_ran 'rake --backtrace some:task'
+assert_ran 'rake --dry-run some:task'
+assert_ran 'rake --all --tasks'
+assert_ran 'rake --comments --tasks'
+assert_ran 'rake --rules'
+assert_ran 'rake --job-stats some:task'
+assert_ran 'rake --silent some:task'
+assert_ran 'rake --version'
+# Task names, task arguments and VAR=value assignments are not options and are
+# not screened.
+assert_ran 'rake db:rollback STEP=99'   'rake db:rollback STEP=99'
+assert_ran 'rake "some:task[a,b]"'
+assert_ran 'rake -s db:migrate STEP=1'
+
+cg_section "the commands Rails parses itself get their own list"
+# `-e` is the environment here, not rake's execute. These commands never reach
+# rake's parser -- but they are allowlisted rather than exempted, so a mistake
+# in the list is a denial rather than a silent bypass.
+assert_ran 'rails runner -e production Model.foo'
+assert_ran 'rails runner --environment production Model.foo'
+assert_ran 'rails runner -w Model.foo'
+assert_ran 'rails c -e production'
+assert_ran 'rails console --environment production'
+assert_ran 'rails c --no-sandbox'
+assert_ran 'rails c'
+assert_ran 'bundle exec rails c -e production'
+# Options neither Rails command takes are refused rather than passed through.
+assert_blocked 'rails c --no-such-option'   'allowlisted'
+assert_blocked 'rails runner -f Model.foo'  'allowlisted'
+assert_blocked 'rails c -w'                 'allowlisted'
+# regression: `-s` reaches neither parser as anything useful. The rule that
+# matters -- the sandbox denial is scoped to the console -- is pinned by
+# `rake -s` above and `rails c -s` below.
+assert_blocked 'rails runner -s Model.foo'  'allowlisted'
 
 cg_section "regression (finding 2): parameter expansion must not defeat policy"
 cg_env 'P=-'                    ; assert_blocked 'rails runner $P'      'stdin'

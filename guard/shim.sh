@@ -240,4 +240,138 @@ if [[ "$_cg_policy_prog" == "rails" && ( "$_cg_sub" == "runner" || "$_cg_sub" ==
   done
 fi
 
+# ---------- option allowlist ----------
+# `rake -e/-p/-E CODE` evaluates CODE inside Rake's own option parser -- before
+# the Rakefile is loaded and without booting Rails -- and then exits. Nothing the
+# code does reaches the console audit hook, so it is weaker even than the
+# `rails runner 'system("bash")'` case the README accepts as best effort, where
+# Rails at least boots and the invocation is recorded. `-f/-r/-I/-R/-C/-g` name a
+# path rather than the code that runs, which is what blocks a bare `-` above.
+#
+# Rails hands any command it does not recognise to that same parser with the
+# whole argv, so `rails -e CODE` and `rails db:migrate -e CODE` reach it too.
+#
+# Allowlisted rather than screened. A deny list has to model which of Rake's
+# short options take an argument, in order to know where a bundle such as `-Ne`
+# stops being flags -- get that wrong for one option, in this version of Rake or
+# a later one, and the bundle hides an `-e`. An allowlist fails the other way: an
+# option nobody listed is refused, so the cost of being wrong is a denial rather
+# than an unlogged shell.
+#
+# Every command gets a list; none is exempt. The two Rails commands below parse
+# their own options and never reach Rake, so `-e` there is the environment --
+# but they are given a list of their own rather than being waved through,
+# because a mistake in a list is a denial while a mistake in an exemption is a
+# bypass, silently and with no failing test.
+#
+# _cg_allow_exact  options taking no value: the token must match exactly, so
+#                  `-se` is refused rather than read as a bundle
+# _cg_allow_value  options taking one: exactly, or with the value attached
+#                  (`-T db`, `-Tdb`, `--tasks=db`)
+_cg_allow_why=(
+  "Options are allowlisted here. Rake evaluates \`-e/-p/-E CODE\` in"
+  "its own option parser, before the Rakefile is loaded and without"
+  "booting Rails, so nothing that code does reaches the console audit"
+  "hook -- and Rails hands any command it does not recognise to that"
+  "same parser. Options naming a path are excluded for the reason a"
+  "bare \`-\` is."
+)
+_cg_allow_extras="task names, VAR=value assignments, and:"
+
+case "${_cg_policy_prog}/${_cg_sub}" in
+  rails/console|rails/c)
+    _cg_allow_exact="--no-sandbox -h --help"
+    _cg_allow_value="-e --environment"
+    _cg_allow_why=(
+      "Options are allowlisted here, so one nobody vetted is refused"
+      "rather than passed through to Rails."
+    )
+    _cg_allow_extras=""
+    ;;
+  rails/runner|rails/r)
+    _cg_allow_exact="-w --skip-executor -h --help"
+    _cg_allow_value="-e --environment"
+    _cg_allow_why=(
+      "Options are allowlisted here, so one nobody vetted is refused"
+      "rather than passed through to Rails. The code to run is not an"
+      "option and needs no entry."
+    )
+    _cg_allow_extras=""
+    ;;
+  *)
+    # Rake's read-only and output-shaping options. Absent, deliberately:
+    # -e/-E/-p (evaluate code), -f/-r/-I/-R/-C (name a path), and -g/-G/-N,
+    # which change which Rakefile is found -- `--system` loads tasks from
+    # $HOME/.rake, and $HOME is /app on a dyno.
+    _cg_allow_exact="-A -B -m -n -P -q -s -t -v -V -X -h -H"
+    _cg_allow_exact+=" --all --build-all --multitask --dry-run --prereqs"
+    _cg_allow_exact+=" --quiet --silent --verbose --version --comments --rules"
+    _cg_allow_exact+=" --no-deprecation-warnings --help"
+    _cg_allow_value="-T -D -W -j"
+    _cg_allow_value+=" --tasks --describe --where --jobs --trace --backtrace"
+    _cg_allow_value+=" --job-stats"
+    ;;
+esac
+
+_cg_arg_permitted() {
+  local _cg_tok="$1" _cg_name
+  # Unquoted on purpose: the lists are space-delimited and must word-split.
+  for _cg_name in $_cg_allow_exact; do
+    [[ "$_cg_tok" == "$_cg_name" ]] && return 0
+  done
+  for _cg_name in $_cg_allow_value; do
+    [[ "$_cg_tok" == "$_cg_name" ]] && return 0
+    case "$_cg_name" in
+      --*) [[ "$_cg_tok" == "$_cg_name="* ]] && return 0 ;;
+      *)   [[ "$_cg_tok" == "$_cg_name"?* ]] && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Wrap the permitted set for the denial banner. Derived from the lists above
+# rather than written out again, so the two cannot drift apart.
+_cg_wrap_allowed() {
+  local _cg_line="" _cg_word
+  # shellcheck disable=SC2086  # deliberate word splitting, as above
+  for _cg_word in $_cg_allow_value $_cg_allow_exact; do
+    if (( ${#_cg_line} + ${#_cg_word} + 1 > 58 )); then
+      echo "  $_cg_line"
+      _cg_line="$_cg_word"
+    else
+      _cg_line="${_cg_line:+$_cg_line }$_cg_word"
+    fi
+  done
+  [[ -n "$_cg_line" ]] && echo "  $_cg_line"
+}
+
+for _cg_arg in ${_cg_policy_args[@]+"${_cg_policy_args[@]}"}; do
+  # A bare `-` is handled above, with a message about stdin that says more than
+  # this one would.
+  [[ "$_cg_arg" == "-" ]] && continue
+  [[ "$_cg_arg" == -* ]] || continue
+  _cg_arg_permitted "$_cg_arg" && continue
+
+  # Only when it names a command; for `rake -e 1` the "subcommand" is the
+  # rejected option itself.
+  _cg_context="$_cg_policy_prog"
+  [[ -n "$_cg_sub" && "$_cg_sub" != -* ]] && _cg_context+=" $_cg_sub"
+
+  _cg_allowed_lines=()
+  while IFS= read -r _cg_line; do
+    _cg_allowed_lines+=("$_cg_line")
+  done < <(_cg_wrap_allowed)
+
+  _cg_deny "\`${_cg_policy_prog} ${_cg_arg}\` is not permitted on one-off dynos." \
+           "" \
+           "${_cg_allow_why[@]}" \
+           "" \
+           "Permitted after \`${_cg_context}\`:${_cg_allow_extras:+ $_cg_allow_extras}" \
+           "${_cg_allowed_lines[@]}" \
+           "" \
+           "" \
+           "Short options are matched whole, so pass them separately rather" \
+           "than bundled into one argument."
+done
+
 exec "$_cg_real" "$@"

@@ -20,7 +20,7 @@ Together they:
 * require the `CONSOLE_USER` and `CONSOLE_REASON` environment variables
 * reject compound statements and redirections, while allowing the `--exit-code` marker the Heroku CLI appends
 * permit only unqualified `rails`, `rake` and `bundle exec rails|rake` invocations, minus an
-  explicit deny list
+  explicit deny list, and allowlist the options those may be given
 * warn if [dyno metadata](https://devcenter.heroku.com/articles/dyno-metadata) is not enabled
 * export `CONSOLE_AUDIT_ENABLED=true`
 
@@ -116,6 +116,7 @@ duplicates every rule rather than delegating.
 | `rails credentials:*`, `rails encrypted:*` | Spawns `$EDITOR`, which the operator controls — a shell escape. `EDITOR` and `VISUAL` are also unset |
 | `rails runner -` (a bare `-` in any argument position) | Reads the program from **stdin**, so the executed code appears neither in the dyno command string nor in an `ARGV` capture inside the app. The session still produces a complete record with a correct user, reason and dyno UUID, while the code that ran is unrecorded |
 | `rails runner --file <f>`, or any `runner` argument that exists on disk | Same shape — the command string names a file rather than the code that runs |
+| Any argument beginning with `-` that is not on the option allowlist | See [Option allowlist](#option-allowlist) below |
 | `-c` in any argument position | Reaches a shell (`bash -c`). No legitimate `rails`/`rake` invocation uses it. `rails c` — the console shorthand — is unaffected, because that argument is `c`, not `-c` |
 | `rails console --sandbox` / `-s` (console only) | The sandbox transaction is rolled back on exit, and a database-backed ActiveJob queue on the primary database puts the audit enqueue inside it — so the rollback discards the audit trail and the session runs entirely unlogged ([console1984#91](https://github.com/basecamp/console1984/issues/91)). Scoped to `console`/`c`, because `-s` is `rake`'s silent flag; `--no-sandbox` is unaffected |
 
@@ -138,6 +139,52 @@ task-level guard.
 The `runner` file check tests whether the argument **exists on disk**, which is the same decision
 Rails itself makes. There is no heuristic on how the argument looks, so
 `rails runner 'Model.where(x: 1).rb'` is permitted and `rails runner ~/script` is not.
+
+### Option allowlist
+
+Arguments beginning with `-` are **allowlisted, not screened**. Anything not named below is
+refused.
+
+The reason is `rake -e/-p/-E CODE` (`--execute`, `--execute-print`, `--execute-continue`). Rake
+evaluates `CODE` inside its own option parser — before the Rakefile is loaded, without booting
+Rails — and then exits. Nothing the code does reaches the console audit hook, which makes it
+weaker than the `rails runner 'system("bash")'` case [below](#limitations), where Rails at least
+boots and the invocation is recorded. `rails` is affected too: it hands any command it does not
+recognise to that same parser with the whole argv, so `rails -e CODE` and `rails db:migrate -e
+CODE` reach it.
+
+A deny list would have to model which of Rake's short options take an argument, in order to know
+where a bundle such as `-Ne` or `-se` stops being flags. Get that wrong for one option — in this
+version of Rake or a later one — and the bundle hides an `-e`. An allowlist fails the other way:
+an unlisted option is refused, so being wrong costs a denial rather than an unlogged shell. It
+also refuses things nobody had to think of, such as `-g`/`--system`, which loads tasks from
+`$HOME/.rake` — `/app/.rake` on a dyno.
+
+Every command gets a list; none is exempt. `rails console` and `rails runner` parse their own
+options and never reach Rake, so `-e` there is the *environment* — but they get a list of their
+own rather than being waved through, because a mistake in a list is a denial while a mistake in
+an exemption is a silent bypass.
+
+| After | Permitted |
+|---|---|
+| `rails console` / `c` | `-e`/`--environment`, `--no-sandbox`, `-h`/`--help` |
+| `rails runner` / `r` | `-e`/`--environment`, `-w`/`--skip-executor`, `-h`/`--help` |
+| everything else (Rake's parser) | `-T`/`--tasks`, `-D`/`--describe`, `-W`/`--where`, `-P`/`--prereqs`, `-A`/`--all`, `--comments`, `--rules`, `-t`/`--trace`, `--backtrace`, `--job-stats`, `-s`/`--silent`, `-q`/`--quiet`, `-n`/`--dry-run`, `-v`/`--verbose`, `-V`/`--version`, `-m`/`--multitask`, `-j`/`--jobs`, `-B`/`--build-all`, `-X`/`--no-deprecation-warnings`, `-h`/`-H`/`--help` |
+
+Task names, task arguments (`some:task[a,b]`) and `VAR=value` assignments are not options and are
+not screened, so `rake db:rollback STEP=99` is unaffected.
+
+Two consequences worth knowing before you hit them:
+
+- **Short options are matched whole**, so `-sq` is refused where `-s -q` is permitted. This is
+  what makes `-se CODE` refusable without reasoning about bundling at all.
+- **Abbreviated long forms are refused.** Rake accepts `--task` for `--tasks`; the allowlist does
+  not. Denials list the permitted set, so this is self-service.
+
+Deliberately absent from the Rake list: `-e`/`-E`/`-p` (evaluate code), `-f`/`-r`/`-I`/`-R`/`-C`
+(name a path — the same shape as a bare `-`), and `-g`/`-G`/`-N` (change which Rakefile is found).
+Exploiting the path-naming options needs a file already in the slug, i.e. the same deploy-access
+trust boundary as the `BASH_ENV` limitation below.
 
 ### Blocked outright (non-Rails commands)
 
