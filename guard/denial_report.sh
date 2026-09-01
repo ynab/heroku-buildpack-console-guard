@@ -22,7 +22,7 @@
 # proxy already derives (`dyno_id`, and `console_identity` from `operator`)
 # apply to these records unchanged. `event` is what tells them apart.
 #
-# ATTRIBUTION: `app` ONLY
+# ATTRIBUTION: `app` AND `service`
 #
 # The gem sends `service` / `env` / `app` / `version` and stamps them on the
 # *worker*, because `heroku run -e` can rewrite every one of them and a record
@@ -30,17 +30,30 @@
 # of a production-scoped monitor. There is no worker here, so nothing sent from
 # this side can carry that guarantee.
 #
-# `app` is sent anyway, because the alternative is worse. Without it a denial
-# record has no `@app`, and the cross-check queries -- which scope on `@app` to
-# reach both log sources at once -- silently skip every denial. And the tampering
-# argument does not actually transfer: an operator who wants their denial record
-# gone can unset the endpoint above and delete it outright, so forging the app
-# name is strictly weaker than what they can already do. Attribution tampering
-# needs closing where suppression is impossible, which is the gem's position and
-# not this one.
+# `app` and `service` are sent anyway, because the tampering argument does not
+# transfer to them. An operator who wants their denial record gone can unset the
+# endpoint above and delete it outright, so forging either field is strictly
+# weaker than what they can already do, and neither one scopes a monitor. What
+# tampering would actually buy is closed where suppression is impossible, which
+# is the gem's position and not this one.
 #
-# `service` / `env` / `version` stay unsent: nothing needs them for scoping, and
-# datadog-proxy derives the service from the credential, which cannot be forged.
+# Sending them is what keeps a denial record reachable. The cross-check queries
+# scope on `@app` to span both log sources at once, so without it they skip every
+# denial silently. `@service` is the same problem one rung down: the gem stamps
+# it, so a query that filters on it would return sessions and drop the denials
+# beside them. Send it when the app sets DD_SERVICE, and the attribute means one
+# thing on both record kinds -- absent because the app has no DD_SERVICE, never
+# because of which half of the audit trail produced the record.
+#
+# `service` goes under that name, not the `app_service` it lands in Datadog as.
+# datadog-proxy does the renaming (Datadog's JSON preprocessing would otherwise
+# promote a `service` key onto the reserved facet), and one sender contract beats
+# two. It follows that the proxy must have that rename deployed before this does.
+#
+# `env` stays unsent, and the asymmetry is deliberate: it is a reserved facet that
+# scopes monitors, so forging it is the one case where tampering buys something
+# suppression does not. datadog-proxy infers it from the delivery topology, which
+# nothing in this dyno can reach. `version` stays unsent because nothing reads it.
 #
 # LIMITATION
 #
@@ -143,8 +156,9 @@ _cg_report_denial() {
   # session whose $DYNO disagrees with it. HEROKU_DYNO_ID is the fallback and is
   # `-e`-settable, so it is only as good as the app's metadata being enabled.
   _cg_body+="$(_cg_json_field dyno_id "${CONSOLE_GUARD_DYNO_ID:-${HEROKU_DYNO_ID:-}}")"
-  # The one attribution field, so `@app` reaches this record too. See the header.
+  # Attribution, so `@app` and `@app_service` reach this record too. See the header.
   _cg_body+="$(_cg_json_field app "${HEROKU_APP_NAME:-}")"
+  _cg_body+="$(_cg_json_field service "${DD_SERVICE:-}")"
   _cg_body+="$(_cg_json_field guard_version "$_CG_REPORT_VERSION")"
   # datadog-proxy claims `timestamp` as the log's official date, exactly as it
   # does for the gem's records, so a denial is filed at the moment it happened.

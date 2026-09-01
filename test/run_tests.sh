@@ -474,16 +474,27 @@ assert_reported 'marks the denial enforced'   'bash'  '"enforced":true'
 cg_env 'HEROKU_APP_NAME=some-app'
 assert_reported 'carries the app, so @app reaches this record' 'bash' \
   '"app":"some-app"'
-# ...and nothing else attributional: the proxy derives service from the
-# credential, which is the half an operator cannot forge.
+# The gem stamps `service`, so leaving it off here would make @app_service mean
+# "a session record" rather than "the app's DD_SERVICE" -- a filter on it would
+# return the sessions and drop the denials beside them. Sent under `service`;
+# datadog-proxy renames it to `app_service` on the way to Datadog.
+cg_env 'HEROKU_APP_NAME=some-app DD_SERVICE=some-service'
+assert_reported 'carries the service, so @app_service matches the gem' 'bash' \
+  '"service":"some-service"'
+# Absent when the app sets no DD_SERVICE, which is the same reason it would be
+# absent from a gem record. Never absent because a denial produced it.
+cg_env 'HEROKU_APP_NAME=some-app'
+assert_not_reported_field 'sends no service when the app sets none' 'bash' ',"service":'
+
+# ...and nothing else attributional. `env` scopes monitors, so forging it is the
+# one case where tampering buys what suppression does not; the proxy infers it
+# from the delivery topology instead.
 #
 # Matched with the leading comma and trailing colon, because `"version"` is a
 # substring of the `guard_version` field that is legitimately there.
-cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=lies DD_VERSION=lies'
+cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=svc DD_VERSION=lies'
 assert_not_reported_field 'sends no env'     'bash' ',"env":'
-cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=lies DD_VERSION=lies'
-assert_not_reported_field 'sends no service' 'bash' ',"service":'
-cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=lies DD_VERSION=lies'
+cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=svc DD_VERSION=lies'
 assert_not_reported_field 'sends no version' 'bash' ',"version":'
 cg_run_reporting 'bash'
 assert_true 'goes to the configured endpoint' \

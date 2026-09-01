@@ -295,6 +295,7 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
   "reason": "checking a migration",
   "dyno_id": "b922dfe5-0ede-45c8-a267-78bff7a23481",
   "app": "my-app",
+  "service": "my-service",
   "guard_version": "7f1e0d8",
   "timestamp": "2026-08-28T06:24:43.000Z"
 }
@@ -314,18 +315,29 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
   is stripped first, so a CI denial records the command the caller wrote.
 - **`dyno_id`** comes from the dyno metadata file, not from `HEROKU_DYNO_ID`, which `-e` can set to
   anything. It is the join key against the `api:dyno` webhook.
-- **`app`** is the only attribution field sent, and it comes from `HEROKU_APP_NAME`. The gem sends
-  `service`/`env`/`app`/`version` but stamps them on its **worker**, because `heroku run -e` can
-  rewrite all four and a record tagged `env:staging` would keep flowing to Datadog while dropping
-  quietly out of a production-scoped monitor. There is no worker here, so nothing sent from the dyno
-  carries that guarantee — but omitting `app` is worse: the cross-check queries scope on `@app` to
-  reach both log sources at once, so a denial record without it is silently skipped by every one of
-  them. The tampering argument also does not transfer. An operator who wants their denial record gone
-  can unset the endpoint and delete it outright, so forging the app name is strictly weaker than what
-  they can already do; attribution tampering needs closing where suppression is impossible, which is
-  the gem's position and not this one.
-- No `service` / `env` / `version`. Nothing needs them for scoping, and `datadog-proxy` derives the
-  service from the credential, which is the half an operator cannot forge.
+- **`app`** and **`service`** are the attribution fields sent, from `HEROKU_APP_NAME` and
+  `DD_SERVICE`. The gem sends `service`/`env`/`app`/`version` but stamps them on its **worker**,
+  because `heroku run -e` can rewrite all four and a record tagged `env:staging` would keep flowing
+  to Datadog while dropping quietly out of a production-scoped monitor. There is no worker here, so
+  nothing sent from the dyno carries that guarantee — but omitting these two is worse. The
+  cross-check queries scope on `@app` to reach both log sources at once, so a denial record without
+  it is silently skipped by every one of them, and `@app_service` is the same problem one rung down:
+  the gem stamps it, so a query filtering on it would return the sessions and drop the denials beside
+  them. Sending `service` makes the attribute mean one thing on both record kinds — absent because
+  the app sets no `DD_SERVICE`, never because a denial produced the record.
+
+  The tampering argument does not transfer to either field. An operator who wants their denial record
+  gone can unset the endpoint and delete it outright, so forging them is strictly weaker than what
+  they can already do, and neither one scopes a monitor. Attribution tampering needs closing where
+  suppression is impossible, which is the gem's position and not this one.
+
+  `service` is sent under that name even though it reaches Datadog as `@app_service`. `datadog-proxy`
+  does the renaming, because Datadog's JSON preprocessing would otherwise promote a `service` key
+  onto the reserved service facet. One sender contract beats two — but it does mean the proxy needs
+  that rename deployed **before** this buildpack starts sending the field.
+- No `env` / `version`. `env` is a reserved facet that scopes monitors, which makes it the one field
+  where forging buys something suppression does not, so `datadog-proxy` infers it from the delivery
+  topology instead — nothing in the dyno can reach that. Nothing reads `version`.
 
 Every string in the record is escaped to **pure ASCII**, and any byte `>= 0x80` is replaced with
 U+FFFD. A JSON string has to be valid UTF-8, and both `command` and `reason` are operator-controlled
@@ -482,6 +494,8 @@ Set as a config var on the app, and read at **run** time:
 |---|---|---|
 | `CONSOLE_BLOCK_ENFORCE` | No | `false` opts into phase 1 permit mode. Defaults to enforcing, and only the exact value `false` opts out. Temporary: removed at the end of phase 1, and until then not tamper-proof |
 | `CONSOLE_LOGGING_DATADOG_PROXY_URL` | No | Where to POST a [denial record](#denials-are-recorded-not-just-printed). Same variable, endpoint and Basic credential as the companion gem. Unset means denials are not recorded. Read on the one-off dyno, so `-e` can suppress it |
+| `HEROKU_APP_NAME` | No | Attribution on a denial record. Set by Heroku's dyno metadata; unset means the record carries no `@app` and the cross-check queries skip it |
+| `DD_SERVICE` | No | Attribution on a denial record, forwarded as `@app_service`. The same var the companion gem stamps, so the attribute matches across both record kinds. Unset means the field is omitted |
 
 Set as a config var on the app, and read at **build** time:
 
