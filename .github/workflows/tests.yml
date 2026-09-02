@@ -39,5 +39,12 @@ jobs:
         run: |
           bash --version
           ruby --version
+      # Policy. Runs anywhere Ruby does; it is in the stack matrix for the
+      # version spread, not because it needs a stack.
+      - name: Policy tests
+        run: ruby test/run_ruby_tests.rb
+
+      # Everything the shell does around the policy, which needs a real login
+      # shell and procfs.
       - name: End-to-end tests
         run: ./test/run_tests.sh

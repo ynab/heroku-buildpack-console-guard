@@ -589,20 +589,34 @@ They are audited but not gated. See [Limitations](#limitations).
 ## Development
 
 ```
-./test/run_tests.sh                 # end-to-end suite; needs Linux (procfs) and a ruby
+ruby test/run_ruby_tests.rb         # policy; runs anywhere, macOS included
+./test/run_tests.sh                 # end-to-end; needs Linux (procfs) and a ruby
 shellcheck -s bash bin/* profile/*.sh guard/*.sh test/*.sh test/lib/*.sh
 ruby --disable=gems -c guard/lib/console_guard/*.rb
 ```
 
-The suite compiles the buildpack into a temporary build directory and runs payloads through a login
-shell arranged to look like a one-off dyno — `$HOME` is the build directory, `$HOME/.profile` sources
-`.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake`/`bundle` on `PATH` reports the `argv` it
-received. A test therefore distinguishes "blocked" from "ran, with exactly these arguments".
+There are two suites, split by what they can actually observe. Both compile the buildpack into a
+temporary build directory first, so they test the rendered files a dyno gets rather than the
+templates in `guard/`.
 
-Every bypass fixed in this repo has a regression case, and CI runs the suite inside every supported
-`heroku/heroku` stack image. The stack images carry no Ruby, so the suite installs the
+**`test/run_ruby_tests.rb` — policy.** Which commands, arguments and options are refused, what each
+denial records, and which exit status the gate returns. It drives the two entry points as
+subprocesses with a fabricated login-shell `argv`, so it needs no procfs and no stack: it runs on a
+laptop. Subprocesses rather than in-process calls on purpose — both halves refuse by calling `exit`
+and the wrapper ends in `exec`, so testing them in process would mean adding a seam to the guard
+that exists only for the tests, and a seam is where a bypass hides.
+
+**`test/run_tests.sh` — end to end.** Everything the *shell* does, which Ruby cannot stand in for:
+`.profile.d` being sourced, the login shell acting on the gate's exit status, the shell expanding
+the operator's command before the wrapper sees it, a permitted command reaching the real binary, and
+the interpreter hardening above. `$HOME` is the build directory, `$HOME/.profile` sources
+`.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake`/`bundle` on `PATH` reports the
+`argv` it received — so a test distinguishes "blocked" from "ran, with exactly these arguments".
+
+Every bypass fixed in this repo has a regression case, and CI runs both suites inside every
+supported `heroku/heroku` stack image. The stack images carry no Ruby, so the suite installs the
 distribution's and the guard runs on that — the version spread across the matrix is what keeps the
-policy honest about using stdlib only.
+policy honest about using stdlib only, and what catches the C-locale encoding traps a dyno has.
 
 When adding a rule, put it in `ConsoleGuard::Command` if it is about the command's **arguments** and
 in `ConsoleGuard::Gate` only if it is about the environment or the raw command string. See

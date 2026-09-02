@@ -317,36 +317,6 @@ assert_reported() {
   _cg_report true "$label"
 }
 
-# assert_not_reported_field <label> <payload> <substring the record must NOT have>
-# A record is still required: this distinguishes "the field is absent" from "no
-# record was sent", which would otherwise pass for the wrong reason.
-assert_not_reported_field() {
-  local label="$1" payload="$2" unexpected="$3" bodies
-  cg_run_reporting "$payload"
-  bodies="$(cg_reported_bodies)"
-  if [[ -z "$bodies" ]]; then
-    _cg_report false "$label" "no denial record was POSTed at all"
-    return
-  fi
-  if [[ "$bodies" == *"$unexpected"* ]]; then
-    _cg_report false "$label" "record contained '$unexpected': $bodies"
-    return
-  fi
-  _cg_report true "$label"
-}
-
-# assert_not_reported <label> <payload>
-assert_not_reported() {
-  local label="$1" payload="$2" bodies
-  cg_run_reporting "$payload"
-  bodies="$(cg_reported_bodies)"
-  if [[ -n "$bodies" ]]; then
-    _cg_report false "$label" "a denial record was POSTed: $bodies"
-    return
-  fi
-  _cg_report true "$label"
-}
-
 # assert_true <label> <command...> -- generic assertion for build-time checks
 assert_true() {
   local label="$1"; shift

@@ -3,10 +3,21 @@
 #
 #   ./test/run_tests.sh
 #
-# No dependencies beyond bash and coreutils. Every case names the behaviour it
-# pins; the cases marked "regression" were bypasses that passed the gate at
-# 7f1e0d8 (the initial commit) and must stay blocked.
-
+# This suite is deliberately small. Policy -- which commands, arguments and
+# options are refused, and what each denial records -- is tested in Ruby, where
+# a case is a case rather than a shell payload; see test/run_ruby_tests.rb.
+#
+# What is left here is everything the *shell* does, which Ruby cannot stand in
+# for:
+#
+#   * bin/compile produces a slug that works
+#   * .profile.d is sourced, and the login shell acts on the gate's exit status
+#     -- PATH, EDITOR/VISUAL, CONSOLE_AUDIT_ENABLED, CONSOLE_USER, exiting
+#   * the shell expands the operator's command before the wrapper sees it, which
+#     is the entire reason the guard is in two halves
+#   * a permitted command reaches the real binary through the wrapper
+#   * neither half's interpreter can be chosen by the operator
+#
 # Payloads below are deliberately single-quoted: they are shell source for the
 # dyno command and must NOT be expanded here.
 # shellcheck disable=SC2016
@@ -21,397 +32,123 @@ cg_build default CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/default/dyno-met
 # A file only some tests create, so the metadata-absent path is the default.
 touch "$CG_APP/payload.rb" "$CG_APP/script.rb"
 
-cg_section "permitted commands still work"
+cg_section "a permitted command reaches the real binary"
+# Through .profile.d, the PATH the gate prepended, and the wrapper's own
+# re-resolution of the real binary from the rest of PATH.
 assert_ran 'rails c'                        'rails c'
-assert_ran 'rails console'                  'rails console'
 assert_ran 'rake some_task:some_action'     'rake some_task:some_action'
 assert_ran 'rails runner Model.some_method' 'rails runner Model.some_method'
-# Quoted inline code has to keep working: the wrapper exists so that policy can
-# be enforced without banning quotes.
-assert_ran "rails runner 'Model.some_method(1, 2)'" 'rails runner Model.some_method(1, 2)'
-assert_ran 'rails db:migrate'               'rails db:migrate'
-assert_ran 'rake db:migrate'                'rake db:migrate'
-# Destructive db tasks are deliberately not gated here: the api:dyno webhook
-# records them and the app's own production guard covers the rest.
-assert_ran 'rake db:drop'                   'rake db:drop'
-assert_ran 'rails db:migrate:reset'         'rails db:migrate:reset'
 assert_ran 'rake db:rollback STEP=99'       'rake db:rollback STEP=99'
-assert_ran 'rake db:seed'
-assert_ran 'rake -T'                        'rake -T'
-assert_ran 'rails runner -e production Model.foo'
+# Heroku's Ruby buildpack rewrites `rake <task>` to this before the login shell
+# runs, and `bundle exec` then puts Bundler's bin directory ahead of the
+# wrapper -- so the `bundle` wrapper is the only place policy can be applied.
+assert_ran 'bundle exec rake db:migrate'    'bundle exec rake db:migrate'
 
-cg_section "identification is required"
-cg_env 'CONSOLE_USER='       ; assert_blocked 'rails c' 'CONSOLE_USER is not set'
-cg_env 'CONSOLE_REASON='     ; assert_blocked 'rails c' 'CONSOLE_REASON is not set'
-cg_env 'CONSOLE_REASON=   '  ; assert_blocked 'rails c' 'CONSOLE_REASON is not set'
-cg_env 'CONSOLE_USER=   '    ; assert_blocked 'rails c' 'CONSOLE_USER is not set'
-# Naming the missing one matters: the usual cause is a failed `heroku whoami`
-# substituting an empty string, which looks like neither was set.
-cg_env 'CONSOLE_USER= CONSOLE_REASON=' ; assert_blocked 'rails c' \
-  'CONSOLE_USER and CONSOLE_REASON are not set'
-cg_env 'CONSOLE_USER='       ; assert_no_output 'names only the missing variable' \
-  'rails c' 'CONSOLE_REASON is not set'
+cg_section "a denial from either half stops the session"
+assert_blocked 'psql'             'not permitted'
+assert_blocked 'rails dbconsole'  'raw database session'
+assert_blocked 'rake -e 1'        'allowlisted'
+cg_env 'CONSOLE_USER=' ; assert_blocked 'rails c' 'CONSOLE_USER is not set'
 
-cg_section "allowlist"
-assert_blocked 'bash'                  'not permitted'
-assert_blocked 'sh'                    'not permitted'
-assert_blocked 'irb'
-assert_blocked 'ruby -e 1'
-assert_blocked 'psql'
-assert_blocked 'printenv'
-assert_blocked 'curl https://example.com'
-# `bundle exec rails|rake` is permitted -- Heroku's Ruby buildpack produces it
-# for a permitted command. See the bundle exec section for what that admits.
-# Path-qualified forms are rejected because they skip the PATH lookup that
-# reaches the command wrapper.
-assert_blocked 'bin/rails c'           'must be unqualified'
-assert_blocked './bin/rails c'         'must be unqualified'
-assert_blocked '/app/bin/rails c'      'must be unqualified'
-# A leading assignment could put the wrapper out of reach: PATH=... rails c
-assert_blocked 'FOO=1 rails c'         'must be unqualified'
-assert_blocked 'PATH=/usr/bin rails c' 'must be unqualified'
+cg_section "the shell expands the command before the wrapper sees it"
+# The reason the guard is in two halves. The profile script sees a string, and
+# every spelling below reaches `rails` as an argv that string does not contain.
+# Policy is applied to the argv, so all of them are refused -- and this is the
+# only place that can be demonstrated, because it is the shell doing the work.
 
-cg_section "bundle exec, as Heroku's Ruby buildpack produces it"
-# Heroku rewrites `rake <task>` on a one-off dyno to `bundle exec rake <task>`
-# before the login shell runs, so `bundle` must be permitted or no rake task
-# works at all. `bundle exec` also unshifts Bundler's bin directory onto PATH,
-# which puts the real rails/rake ahead of the wrapper -- so the `bundle` wrapper
-# is the only place the argument rules can be applied, and these cases pin that.
-assert_ran 'bundle exec rake db:migrate'  'bundle exec rake db:migrate'
-assert_ran 'bundle exec rails c'          'bundle exec rails c'
-assert_ran 'bundle exec rails runner Model.some_method'
-# Admitting `bundle` must not admit what it can wrap.
-assert_blocked 'bundle exec bash'         'not permitted'
-assert_blocked 'bundle exec sh -c id'     'not permitted'
-assert_blocked 'bundle exec irb'          'not permitted'
-assert_blocked 'bundle install'           'Ruby buildpack produces'
-assert_blocked 'bundle'                   'Ruby buildpack produces'
-assert_blocked 'bundle exec'              'may be run under'
-assert_blocked 'bundle exec bin/rails c'  'unqualified'
-# Every rule the rails/rake wrapper applies must apply through bundle too,
-# because this is now the only wrapper the command reaches.
-assert_blocked 'bundle exec rails dbconsole'        'raw database session'
-assert_blocked 'bundle exec rails "dbconsole"'      'raw database session'
-assert_blocked 'bundle exec rails credentials:edit' 'editor'
-assert_blocked 'bundle exec rails runner -'         'stdin'
-assert_blocked 'bundle exec rails runner "-"'       'stdin'
-assert_blocked 'bundle exec rails runner script.rb' 'exists on disk'
-assert_blocked 'bundle exec rails runner *.r?'      'exists on disk'
-assert_blocked 'bundle exec rake -c'                'flag is not permitted'
+# quote removal
+assert_blocked 'rails "dbconsole"'          'raw database session'
+assert_blocked "rails 'dbconsole'"          'raw database session'
+assert_blocked 'rails db""console'          'raw database session'
+assert_blocked 'rails "credentials:edit"'   'editor'
+assert_blocked 'rails runner "-"'           'stdin'
+assert_blocked 'rails "-c" foo'             'flag is not permitted'
+assert_blocked 'rails c "--sandbox=true"'   'unlogged'
+assert_blocked 'rake "--execute=1"'         'allowlisted'
+# parameter expansion
+cg_env 'P=-'                ; assert_blocked 'rails runner "$P"' 'stdin'
+cg_env 'P=-'                ; assert_blocked 'rails runner ${P}' 'stdin'
+cg_env 'T=credentials:edit' ; assert_blocked 'rails $T'          'editor'
+cg_env 'S=--sandbox'        ; assert_blocked 'rails c $S'        'unlogged'
+cg_env 'F=script.rb'        ; assert_blocked 'rails runner $F'   'exists on disk'
+# pathname expansion
+assert_blocked 'rails runner *.r?'            'exists on disk'
+assert_blocked 'rails runner ~/script.rb'     'exists on disk'
+assert_blocked 'rails runner $HOME/script.rb' 'exists on disk'
+# brace expansion
+assert_blocked 'rails runner {-,foo}'         'stdin'
+assert_blocked 'rails {db,dbconsole}'         'raw database session'
+# ...and a name that does not exist on disk is inline code, as it is to Rails.
+assert_ran "rails runner 'Model.where(x: 1).rb'"
+assert_ran 'rails runner ~/no_such_file.rb'
 
-cg_section "denials report what the gate parsed"
-# A denial that does not echo the command cannot be diagnosed from an operator's
-# report: "not permitted" alone says nothing about which word was rejected, or
-# whether the gate even parsed the string that was typed.
-assert_output 'allowlist denial echoes the command' \
-  'bundle exec rails c' 'bundle exec rails c'
-assert_output 'allowlist denial names the rejected word' \
-  'bundle exec rails c' 'bundle'
-assert_output 'allowlist denial echoes a qualified path' \
-  '/app/bin/rails c' '/app/bin/rails c'
-assert_output 'compound denial echoes the command' \
-  'rails runner "1"; bash' 'rails runner "1"; bash'
+cg_section "compound statements and redirections"
+# argv[0] is all the allowlist matches, so without this an operator could append
+# a second command and reach a shell.
+assert_blocked 'rails runner "1"; bash'   'Compound'
+assert_blocked 'rails c | tee /tmp/x'     'Compound'
+assert_blocked 'rails runner $(whoami)'   'Compound'
+assert_blocked 'rails c < /app/script.rb' 'redirections'
+
+cg_section "the CLI's --exit-code marker"
+# The CLI reads this line off stdout to decide what to exit with, and a denial
+# exits during .profile.d, so the appended echo never runs. Without the gate
+# emitting one itself, a blocked CI job goes green.
+CG_SENTINEL=$'￿'
+CG_MARKER="; echo \"${CG_SENTINEL} heroku-command-exit-status: \$?\""
+
+assert_ran "rake db:version${CG_MARKER}" 'rake db:version'
+assert_output 'a denial emits a failing marker on stdout' \
+  "psql${CG_MARKER}" "${CG_SENTINEL} heroku-command-exit-status: 1"
+assert_no_output 'no marker without --exit-code' 'psql' 'heroku-command-exit-status'
 
 cg_section "a command the gate cannot read is refused as such"
-# Not the allowlist denial: there is no command string here, and reporting one
-# invented from the whole argv sends the operator hunting for a command they
-# never typed.
+# A real login shell with no -c payload, which is the shape the gate is not
+# built on. Fabricating that argv proves the parse; this proves the shape exists.
 cg_run_no_dash_c 'rails c'
 _cg_probe="$CG_OUT"
 assert_true 'refuses when the login shell has no -c payload' \
   bash -c '[[ "$1" == *"Could not determine the dyno command"* ]]' _ "$_cg_probe"
-assert_true 'reports the login shell argv it did see' \
-  bash -c '[[ "$1" == *"Login shell argv:"* ]]' _ "$_cg_probe"
-assert_true 'does not report it as a disallowed command' \
-  bash -c '[[ "$1" != *"not permitted on one-off dynos"* ]]' _ "$_cg_probe"
 assert_true 'does not run the command' \
   bash -c '[[ "$1" != *"RAN "* ]]' _ "$_cg_probe"
 unset _cg_probe
 
-cg_section "compound statements and redirections"
-assert_blocked 'rails runner "1"; bash'
-assert_blocked 'rails c && bash'
-assert_blocked 'rails c | tee /tmp/x'
-assert_blocked 'rails runner `whoami`'
-assert_blocked 'rails runner $(whoami)'
-# regression (finding 3): stdin redirection reopened the hole the bare `-` check
-# exists to close.
-assert_blocked 'rails c < /app/script.rb'      'redirections'
-assert_blocked 'rails c < script.rb'           'redirections'
-assert_blocked 'rake some:task <<< "x"'        'redirections'
-assert_blocked 'rails runner Model.foo > /tmp/o'
-assert_blocked 'rails runner Model.foo 2>/tmp/o'
-
-cg_section "the CLI's --exit-code marker"
-# `heroku run --exit-code` appends this to the dyno command and reads the line it
-# produces off stdout. Without special handling every CI caller is denied as a
-# compound statement, and every denial exits 0 because the appended echo never runs.
-CG_SENTINEL=$'￿'
-CG_MARKER="; echo \"${CG_SENTINEL} heroku-command-exit-status: \$?\""
-
-assert_ran    "rake db:version${CG_MARKER}"          'rake db:version'
-assert_ran    "rails runner 1${CG_MARKER}"           'rails runner 1'
-assert_ran    "bundle exec rake db:version${CG_MARKER}"
-
-# The marker is stripped, not trusted: what precedes it is still vetted in full.
-assert_blocked "psql${CG_MARKER}"                    'not permitted'
-assert_blocked "rails c ; bash${CG_MARKER}"          'Compound'
-assert_blocked "rails dbconsole${CG_MARKER}"         'not permitted'
-
-# Stripped at most once, so a second copy still reads as a compound.
-assert_blocked "rails c${CG_MARKER}${CG_MARKER}"     'Compound'
-
-# The reason the match is an exact literal rather than a pattern: a loose rule
-# such as s/;.*exit-status.*$// strips this back to `rails c` and lets a shell out.
-assert_blocked 'rails c ; bash # heroku-command-exit-status'  'Compound'
-assert_blocked 'rails c ; bash ; echo "heroku-command-exit-status: $?"' 'Compound'
-
-# A denial has to stand in for the echo it skipped, on stdout, or the CLI reports
-# success for a command that never ran.
-assert_output 'denial emits a failing exit-status marker when --exit-code was used' \
-  "psql${CG_MARKER}" "${CG_SENTINEL} heroku-command-exit-status: 1"
-cg_env 'CONSOLE_USER=' ; assert_output \
-  'the identity gate emits it too -- the denial CI is likeliest to hit' \
-  "rake db:version${CG_MARKER}" "${CG_SENTINEL} heroku-command-exit-status: 1"
-
-# ...and must not invent one for a caller that never asked for it.
-assert_no_output 'no marker without --exit-code' \
-  'psql' 'heroku-command-exit-status'
-
-cg_section "regression (finding 2): quote removal must not defeat policy"
-assert_blocked 'rails "dbconsole"'              'not permitted'
-assert_blocked "rails 'dbconsole'"              'not permitted'
-assert_blocked 'rails db""console'              'not permitted'
-assert_blocked 'rails ""dbconsole'              'not permitted'
-assert_blocked 'rails "credentials:edit"'       'editor'
-assert_blocked 'rails credentials:ed"it"'       'editor'
-assert_blocked "rails 'credentials:edit'"       'editor'
-assert_blocked 'rails runner "-"'               'stdin'
-assert_blocked "rails runner '-'"               'stdin'
-assert_blocked 'rails runner -""'               'stdin'
-assert_blocked 'rails "-c" foo'                 'flag is not permitted'
-assert_blocked 'rails runner "--file=/app/script.rb"'
-assert_blocked 'rails runner "--file" script.rb'
-
-cg_section "sandboxed consoles roll back the audit trail"
-assert_blocked 'rails console --sandbox'        'unlogged'
-assert_blocked 'rails c --sandbox'              'unlogged'
-assert_blocked 'rails c -s'                     'unlogged'
-assert_blocked 'rails console -s'               'unlogged'
-assert_blocked 'bundle exec rails c --sandbox'  'unlogged'
-assert_blocked 'rails c "--sandbox"'            'unlogged'
-cg_env 'S=--sandbox'            ; assert_blocked 'rails c $S'           'unlogged'
-# Thor takes `--flag=value` for a boolean, so the `=` forms have to be denied by
-# this rule and not merely by the option allowlist below -- otherwise adding a
-# sandbox-ish entry to the console's allowlist reopens the bypass with the whole
-# suite green. Denied whatever the value is, `false` included: deciding which
-# values Thor reads as true is modelling the parser.
-assert_blocked 'rails c "--sandbox=true"'       'unlogged'
-assert_blocked 'rails console "--sandbox=true"' 'unlogged'
-assert_blocked 'rails c "--sandbox=1"'          'unlogged'
-assert_blocked 'rails c "--sandbox=false"'      'unlogged'
-assert_blocked 'rails c "-s=true"'              'unlogged'
-assert_blocked 'bundle exec rails c "--sandbox=true"' 'unlogged'
-cg_env 'S=--sandbox=true'       ; assert_blocked 'rails c $S'           'unlogged'
-# The denial points at the spelling that works.
-assert_output 'the sandbox denial names --no-sandbox' \
-  'rails c "--sandbox=true"' '`--no-sandbox` is permitted'
-# Scoped to the console: -s is rake's silent flag, and --no-sandbox is the safe
-# direction. Neither is collateral damage.
-assert_ran 'rake -s some:task'
-assert_ran 'rails c --no-sandbox'
-assert_ran 'rails c'
-
-cg_section "rake evaluates code in its own option parser"
-# -e/-p/-E eval and exit inside rake's option parser, before the Rakefile is
-# loaded, so nothing boots and the audit hook records nothing at all.
-assert_blocked 'rake -e 1'                     'allowlisted'
-assert_blocked 'rake --execute 1'              'allowlisted'
-assert_blocked 'rake -p 1+1'                   'allowlisted'
-assert_blocked 'rake -E 1'                     'allowlisted'
-assert_blocked 'rake --execute-print 1'        'allowlisted'
-assert_blocked 'rake --execute-continue 1'     'allowlisted'
-assert_blocked 'rake "--execute=1"'            'allowlisted'
-assert_blocked 'bundle exec rake -e 1'         'allowlisted'
-cg_env 'P=-e' ; assert_blocked 'rake $P 1'     'allowlisted'
-# Short options bundle in rake, so the allowlist matches whole tokens: `-s` is
-# permitted but `-se` is a different token and is refused.
-assert_blocked 'rake -Ne 1'                    'allowlisted'
-assert_blocked 'rake -se 1'                    'allowlisted'
-assert_blocked 'rake -qsNe 1'                  'allowlisted'
-# ...which also means a bundle of two permitted flags is refused. Cheap: -s -q.
-assert_blocked 'rake -sq some:task'            'matched whole'
-# Abbreviated long forms, which rake accepts and the allowlist does not.
-assert_blocked 'rake --exec 1'                 'allowlisted'
-assert_blocked 'rake --ex 1'                   'allowlisted'
-assert_blocked 'rake --task'                   'allowlisted'
-# Options that name a path rather than the code that runs.
-assert_blocked 'rake -f Rakefile some:task'    'allowlisted'
-assert_blocked 'rake -r ./payload some:task'   'allowlisted'
-assert_blocked 'rake -I /app some:task'        'allowlisted'
-assert_blocked 'rake -R /app some:task'        'allowlisted'
-assert_blocked 'rake -C /app some:task'        'allowlisted'
-assert_blocked 'rake --require ./payload'      'allowlisted'
-assert_blocked 'rake --rakefile Rakefile'      'allowlisted'
-# `--system` loads tasks from $HOME/.rake, and $HOME is /app on a dyno. The
-# allowlist refuses these without anyone having had to think of them.
-assert_blocked 'rake -g some:task'             'allowlisted'
-assert_blocked 'rake -G some:task'             'allowlisted'
-assert_blocked 'rake -N some:task'             'allowlisted'
-assert_blocked 'rake --system some:task'       'allowlisted'
-assert_blocked 'rake --suppress-backtrace x'   'allowlisted'
-assert_blocked 'rake --no-such-option'         'allowlisted'
-# Rails hands a command it does not recognise to rake's option parser, argv and
-# all, so the same options arrive by way of `rails`.
-assert_blocked 'rails -e 1'                    'allowlisted'
-assert_blocked 'rails db:migrate -e 1'         'allowlisted'
-assert_blocked 'bundle exec rails -e 1'        'allowlisted'
-# The denial names what is permitted, so a false positive is self-service.
-assert_output 'the denial lists the permitted options' \
-  'rake --no-such-option' '--tasks'
-assert_output 'the denial names the option it refused' \
-  'rake --no-such-option' '`rake --no-such-option` is not permitted'
-assert_output 'the denial names the command it applies to' \
-  'rails db:migrate --no-such-option' 'Permitted after `rails db:migrate`'
-
-cg_section "the permitted rake options still work"
-assert_ran 'rake -T'                    'rake -T'
-assert_ran 'rake -T db'
-assert_ran 'rake -Tdb'                  'rake -Tdb'
-assert_ran 'rake "--tasks=db"'
-assert_ran 'rake -D db'
-assert_ran 'rake -W some:task'
-assert_ran 'rake -P'
-assert_ran 'rake -s some:task'
-assert_ran 'rake -q some:task'
-assert_ran 'rake -n some:task'
-assert_ran 'rake -t some:task'
-assert_ran 'rake -v some:task'
-assert_ran 'rake -V'
-assert_ran 'rake -A -T'
-assert_ran 'rake -B some:task'
-assert_ran 'rake -m some:task'
-assert_ran 'rake -j 4 some:task'
-assert_ran 'rake -j4 some:task'
-assert_ran 'rake -X some:task'
-assert_ran 'rake --trace some:task'     'rake --trace some:task'
-assert_ran 'rake "--trace=stderr" some:task'
-assert_ran 'rake --backtrace some:task'
-assert_ran 'rake --dry-run some:task'
-assert_ran 'rake --all --tasks'
-assert_ran 'rake --comments --tasks'
-assert_ran 'rake --rules'
-assert_ran 'rake --job-stats some:task'
-assert_ran 'rake --silent some:task'
-assert_ran 'rake --version'
-# Task names, task arguments and VAR=value assignments are not options and are
-# not screened.
-assert_ran 'rake db:rollback STEP=99'   'rake db:rollback STEP=99'
-assert_ran 'rake "some:task[a,b]"'
-assert_ran 'rake -s db:migrate STEP=1'
-
-cg_section "the commands Rails parses itself get their own list"
-# `-e` is the environment here, not rake's execute. These commands never reach
-# rake's parser -- but they are allowlisted rather than exempted, so a mistake
-# in the list is a denial rather than a silent bypass.
-assert_ran 'rails runner -e production Model.foo'
-assert_ran 'rails runner --environment production Model.foo'
-assert_ran 'rails runner -w Model.foo'
-assert_ran 'rails c -e production'
-assert_ran 'rails console --environment production'
-assert_ran 'rails c --no-sandbox'
-assert_ran 'rails c'
-assert_ran 'bundle exec rails c -e production'
-# Options neither Rails command takes are refused rather than passed through.
-assert_blocked 'rails c --no-such-option'   'allowlisted'
-assert_blocked 'rails runner -f Model.foo'  'allowlisted'
-assert_blocked 'rails c -w'                 'allowlisted'
-# regression: `-s` reaches neither parser as anything useful. The rule that
-# matters -- the sandbox denial is scoped to the console -- is pinned by
-# `rake -s` above and `rails c -s` below.
-assert_blocked 'rails runner -s Model.foo'  'allowlisted'
-
-cg_section "regression (finding 2): parameter expansion must not defeat policy"
-cg_env 'P=-'                    ; assert_blocked 'rails runner $P'      'stdin'
-cg_env 'P=-'                    ; assert_blocked 'rails runner "$P"'    'stdin'
-cg_env 'P=-'                    ; assert_blocked 'rails runner ${P}'    'stdin'
-cg_env 'F=script.rb'            ; assert_blocked 'rails runner $F'      'exists on disk'
-cg_env 'T=credentials:edit'     ; assert_blocked 'rails $T'            'editor'
-cg_env 'S=dbconsole'            ; assert_blocked 'rails $S'             'not permitted'
-
-cg_section "regression (finding 2): pathname expansion must not defeat policy"
-assert_blocked 'rails runner *.r?'      'exists on disk'
-assert_blocked 'rails runner scr?pt.rb' 'exists on disk'
-assert_blocked 'rails runner script.rb' 'exists on disk'
-assert_blocked 'rails runner ./script.rb'
-assert_blocked 'rails runner ~/script.rb'  'exists on disk'
-assert_blocked 'rails runner $HOME/script.rb' 'exists on disk'
-# Brace expansion is another way to smuggle a token past a string check. The
-# wrapper sees the expanded argv, so it needs no rule of its own.
-assert_blocked 'rails runner {-,foo}'   'stdin'
-assert_blocked 'rails {db,dbconsole}'   'not permitted'
-assert_blocked 'rails {credentials:edit,x}' 'editor'
-# The file test now matches what Rails itself does, so a name that does not exist
-# on disk is inline code and is allowed -- the old heuristic blocked it.
-assert_ran "rails runner 'Model.where(x: 1).rb'"
-assert_ran 'rails runner ~/no_such_file.rb'
-
-cg_section "enforcement defaults to blocking"
-# Only the exact string `false` opts into permit mode, so a typo or an empty
-# value fails closed.
-cg_env 'CONSOLE_BLOCK_ENFORCE=0'     ; assert_blocked 'bash'
-cg_env 'CONSOLE_BLOCK_ENFORCE='      ; assert_blocked 'bash'
-cg_env 'CONSOLE_BLOCK_ENFORCE=False' ; assert_blocked 'bash'
-cg_env 'CONSOLE_BLOCK_ENFORCE=true'  ; assert_blocked 'bash'
-
-cg_section "regression (finding 6): editor-based shell escapes"
-assert_blocked 'rails credentials:edit'          'editor'
-assert_blocked 'rails credentials:show'          'editor'
-assert_blocked 'rails encrypted:edit config/x'   'editor'
-cg_env 'EDITOR=bash' ; assert_blocked 'rails credentials:edit'
-# EDITOR/VISUAL are also removed from the environment the command inherits.
-cg_env 'EDITOR=bash' ; assert_output 'unsets EDITOR for permitted commands' 'rails c' 'EDITOR=unset'
-cg_env 'VISUAL=bash' ; assert_output 'unsets VISUAL for permitted commands' 'rails c' 'EDITOR=unset'
-
-cg_section "the audit hook is activated"
+cg_section "the login shell acts on the gate's exit status"
 assert_output 'exports CONSOLE_AUDIT_ENABLED on run dynos' 'rails c' 'AUDIT=true'
-
-cg_section "regression (finding 7): dyno families"
-# Scheduler and release dynos are one-off dynos too. They are not gated -- no
-# operator is present to give a reason -- but they must still be audited.
-cg_env 'DYNO=scheduler.9' ; assert_output 'scheduler dynos are audited' \
+cg_env 'DYNO=scheduler.9' ; assert_output 'scheduler dynos are audited, not gated' \
   'printenv CONSOLE_AUDIT_ENABLED' 'true'
-cg_env 'DYNO=release.9'   ; assert_output 'release dynos are audited' \
+cg_env 'DYNO=release.9'   ; assert_output 'release dynos are audited, not gated' \
   'printenv CONSOLE_AUDIT_ENABLED' 'true'
 cg_env 'DYNO=web.1'       ; assert_no_output 'web dynos are left alone' \
   'printenv CONSOLE_AUDIT_ENABLED; echo done' 'true'
 cg_env 'DYNO=worker.1'    ; assert_no_output 'worker dynos are left alone' \
   'printenv CONSOLE_AUDIT_ENABLED; echo done' 'true'
-# An unrecognised or absent dyno name is treated as a one-off dyno.
-cg_env 'DYNO='            ; assert_blocked 'bash' 'not permitted'
+# EDITOR is a shell escape via `rails credentials:edit`. The wrapper blocks those
+# subcommands; the profile script removes the mechanism as well.
+cg_env 'EDITOR=bash' ; assert_output 'unsets EDITOR for permitted commands' 'rails c' 'EDITOR=unset'
+cg_env 'VISUAL=bash' ; assert_output 'unsets VISUAL for permitted commands' 'rails c' 'EDITOR=unset'
 
 cg_section "fail-closed behaviour"
-# regression (finding 8 / the wrapper is load-bearing): if the wrapper is not
-# installed the profile script must refuse rather than run a half gate.
+# If the wrapper is not installed the profile script must refuse rather than run
+# a half gate -- all argument policy is behind it.
 mv "$CG_APP/.console-guard/bin/rails" "$CG_APP/.console-guard/rails.bak"
 assert_blocked 'rails c' 'command wrapper is missing'
 mv "$CG_APP/.console-guard/rails.bak" "$CG_APP/.console-guard/bin/rails"
 assert_ran 'rails c'
-# The bundle wrapper is load-bearing in the same way: without it, Heroku's
-# `bundle exec` rewrite would reach the real bundler with no policy applied.
-mv "$CG_APP/.console-guard/bin/bundle" "$CG_APP/.console-guard/bundle.bak"
-assert_blocked 'rails c' 'command wrapper is missing'
-mv "$CG_APP/.console-guard/bundle.bak" "$CG_APP/.console-guard/bin/bundle"
+# And the same for the policy the wrapper stub execs into.
+mv "$CG_APP/.console-guard/libexec" "$CG_APP/.console-guard/libexec.bak"
+assert_blocked 'rails c'
+mv "$CG_APP/.console-guard/libexec.bak" "$CG_APP/.console-guard/libexec"
 assert_ran 'rails c'
 # The guard version appears in denials, so an operator report identifies the
 # deployed guard.
-assert_output 'denials name the guard version' 'bash' 'console-guard '
+assert_output 'denials name the guard version' 'psql' 'console-guard '
 
 cg_section "the operator cannot choose the guard's interpreter"
-# The policy is Ruby now, so three `heroku run -e` variables are code injection
-# into the thing vetting the command: PATH (which interpreter), RUBYOPT (what it
+# The policy is Ruby, so three `heroku run -e` variables are code injection into
+# the thing vetting the command: PATH (which interpreter), RUBYOPT (what it
 # requires first) and RUBYLIB (what answers a stdlib require). None of them may
-# reach it.
+# reach it, and only a real login shell can demonstrate that.
 mkdir -p "$CG_APP/hostile"
 cat > "$CG_APP/hostile/ruby" <<'EOF'
 #!/bin/bash
@@ -424,214 +161,76 @@ chmod 755 "$CG_APP/hostile/ruby"
 echo 'puts "HOSTILE JSON RAN"' > "$CG_APP/hostile/json.rb"
 
 # Exit 0 from the gate means "not a dyno this applies to", so a hostile ruby that
-# simply succeeds would be a complete bypass -- the profile script would leave
-# PATH alone and never gate anything.
+# simply succeeds would be a complete bypass -- the login shell would leave PATH
+# alone and never gate anything.
 cg_env "PATH=$CG_APP/hostile:/usr/local/bin:/usr/bin:/bin"
 assert_blocked 'psql' 'not permitted'
 cg_env "PATH=$CG_APP/hostile:/usr/local/bin:/usr/bin:/bin"
 assert_no_output 'a ruby earlier on PATH is not the one that runs' 'psql' 'HOSTILE RUBY RAN'
-cg_env 'RUBYOPT=-rhostile_payload'
-assert_blocked 'psql' 'not permitted'
+cg_env 'RUBYOPT=-rhostile_payload' ; assert_blocked 'psql' 'not permitted'
 cg_env 'RUBYOPT=-rhostile_payload' ; assert_ran 'rails c'
-cg_env "RUBYLIB=$CG_APP/hostile" ; assert_ran 'rails c'
+cg_env "RUBYLIB=$CG_APP/hostile"   ; assert_ran 'rails c'
 cg_env "RUBYLIB=$CG_APP/hostile"
 assert_no_output 'RUBYLIB cannot answer a stdlib require' 'rails c' 'HOSTILE JSON RAN'
 # The wrapper is a separate process with its own interpreter to choose, so the
 # same three have to be closed there too.
-cg_env "RUBYLIB=$CG_APP/hostile" ; assert_blocked 'rails dbconsole' 'raw database session'
+cg_env "RUBYLIB=$CG_APP/hostile"   ; assert_blocked 'rails dbconsole' 'raw database session'
 cg_env 'RUBYOPT=-rhostile_payload' ; assert_blocked 'rails dbconsole' 'raw database session'
 
 # ============================================================ dyno metadata
-cg_section "regression (finding 4): \$DYNO cannot be spoofed when metadata exists"
+cg_section "\$DYNO cannot be spoofed when metadata exists"
 cg_build metadata CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/metadata/dyno-metadata.json"
-# The real /etc/heroku/dyno shape: three objects, each with its own name/id, and
-# app.name empty. A greedy parser reads app.name (empty) instead of dyno.name and
-# silently falls back to trusting $DYNO -- the finding-4 hole, reopened.
 cg_write_metadata '{"dyno":{"id":"de7c25da-uuid","name":"run.1234"},"app":{"id":"0d276459-uuid","name":""},"release":{"id":117,"commit":"9eb6f0d7","description":"Deploy 9eb6f0d7"}}'
 assert_ran 'rails c'
-assert_no_output 'no metadata warning when metadata is present' 'rails c' 'dyno metadata is not enabled'
 # The operator claims to be on a web dyno to skip the gate; the file disagrees.
-cg_env 'DYNO=web.1'    ; assert_blocked 'bash' 'does not match this dyno'
-cg_env 'DYNO=web.1'    ; assert_blocked 'rails c' 'does not match this dyno'
-cg_env 'DYNO=run.9999' ; assert_blocked 'bash' 'does not match this dyno'
-# Unparseable metadata degrades to the $DYNO fallback rather than erroring.
-cg_write_metadata 'not json at all'
-assert_ran 'rails c'
-assert_output 'warns when metadata is unreadable' 'rails c' 'dyno metadata is not enabled'
+cg_env 'DYNO=web.1' ; assert_blocked 'rails c' 'does not match this dyno'
 
 # ============================================================ permit mode
-cg_section "phase 1: permit mode (CONSOLE_BLOCK_ENFORCE=false)"
+cg_section "phase 1: permit mode hands the app an operator"
 cg_build permit CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/permit/dyno-metadata.json"
-touch "$CG_APP/script.rb"
 cg_env_sticky 'CONSOLE_BLOCK_ENFORCE=false'
 assert_output 'the audit hook is still activated' 'rails c' 'AUDIT=true'
-# Warns and runs, from both halves of the gate.
-assert_output 'profile check warns and permits' 'bash' 'WILL BE BLOCKED'
-assert_output 'wrapper check warns and permits' 'rails "dbconsole"' 'WILL BE BLOCKED'
-assert_ran 'rails "dbconsole"'
-assert_ran 'rails runner "-"'
-assert_ran 'rails credentials:edit'
-cg_env 'CONSOLE_USER=' ; assert_output 'missing identification warns and permits' \
-  'rails c' 'WILL BE BLOCKED'
+assert_output 'a would-be denial warns and permits' 'psql' 'WILL BE BLOCKED'
 # An empty CONSOLE_USER is not enough to be non-blocking: console1984 raises
 # MissingUsername on one, so the console dies anyway and permit mode fails to
-# permit. The app gets a placeholder instead -- obviously not a real username,
-# so an audit record cannot be mistaken for an identified session.
+# permit. The app gets a placeholder instead -- obviously not a real username, so
+# an audit record cannot be mistaken for an identified session. Only the login
+# shell can export it, which is why it has an exit status of its own.
 cg_env 'CONSOLE_USER=' ; assert_output 'permit mode supplies a placeholder operator' \
   'rails c' 'USER=[not provided]'
 cg_env 'CONSOLE_USER=   ' ; assert_output 'whitespace-only counts as absent here too' \
   'rails c' 'USER=[not provided]'
-# A supplied identity is passed through untouched.
 assert_output 'a real CONSOLE_USER is left alone' 'rails c' 'USER=becky'
-# ...but tampering with the dyno name is still fatal in permit mode.
-cg_write_metadata '{"dyno":{"id":"uuid","name":"run.1234"},"app":{"id":"aid","name":""},"release":{"id":117}}'
-cg_env 'DYNO=web.1' ; assert_blocked 'bash' 'does not match this dyno'
 cg_env_sticky
 
 # ============================================================ denial records
-# The denial banner reaches only the operator's terminal, so without these the
-# only durable trace of a blocked command is Heroku's api:dyno record, which
-# cannot tell a guard denial from an application error.
-cg_section "denials are recorded durably"
+cg_section "denials are recorded through the whole chain"
+# The record's shape is pinned in Ruby. What this proves is that a denial from
+# either half reaches the endpoint from inside a real dyno session.
 cg_build report CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/report/dyno-metadata.json"
 cg_write_metadata '{"dyno":{"id":"dyno-uuid-1","name":"run.1234"},"app":{"id":"aid","name":""},"release":{"id":117}}'
 
-assert_reported 'a profile denial is POSTed'  'bash'  '"event":"command_denied"'
-assert_reported 'names the rule that refused' 'bash'  '"rule":"command_not_allowed"'
-assert_reported 'carries the command'         'psql'  '"command":"psql"'
-assert_reported 'carries the operator'        'bash'  '"operator":"becky"'
-assert_reported 'carries the reason'          'bash'  '"reason":"testing"'
-# The join key for the api:dyno cross-check, taken from the metadata file rather
-# than from HEROKU_DYNO_ID, which `heroku run -e` can set to anything.
-assert_reported 'carries the trusted dyno id' 'bash'  '"dyno_id":"dyno-uuid-1"'
-assert_reported 'marks the denial enforced'   'bash'  '"enforced":true'
-# Without `app` the cross-check queries, which scope on @app to reach both log
-# sources at once, skip every denial record. See guard/denial_report.sh.
-cg_env 'HEROKU_APP_NAME=some-app'
-assert_reported 'carries the app, so @app reaches this record' 'bash' \
-  '"app":"some-app"'
-# The gem stamps `service`, so leaving it off here would make @app_service mean
-# "a session record" rather than "the app's DD_SERVICE" -- a filter on it would
-# return the sessions and drop the denials beside them. Sent under `service`;
-# datadog-proxy renames it to `app_service` on the way to Datadog.
-cg_env 'HEROKU_APP_NAME=some-app DD_SERVICE=some-service'
-assert_reported 'carries the service, so @app_service matches the gem' 'bash' \
-  '"service":"some-service"'
-# Absent when the app sets no DD_SERVICE, which is the same reason it would be
-# absent from a gem record. Never absent because a denial produced it.
-cg_env 'HEROKU_APP_NAME=some-app'
-assert_not_reported_field 'sends no service when the app sets none' 'bash' ',"service":'
-
-# ...and nothing else attributional. `env` scopes monitors, so forging it is the
-# one case where tampering buys what suppression does not; the proxy infers it
-# from the delivery topology instead.
-#
-# Matched with the leading comma and trailing colon, because `"version"` is a
-# substring of the `guard_version` field that is legitimately there.
-cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=svc DD_VERSION=lies'
-assert_not_reported_field 'sends no env'     'bash' ',"env":'
-cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=svc DD_VERSION=lies'
-assert_not_reported_field 'sends no version' 'bash' ',"version":'
-cg_run_reporting 'bash'
-assert_true 'goes to the configured endpoint' \
-  grep -q "^PATH ${CG_REPORT_PATH}$" "$CG_RECORD_LOG"
-
-# The wrapper's denials are half of them, and a trail with only the other half
-# would report every argument-policy block as a clean session.
+assert_reported 'a profile denial is POSTed' 'psql' '"rule":"command_not_allowed"'
 assert_reported 'a wrapper denial is POSTed too' 'rails "dbconsole"' \
   '"rule":"raw_database_session"'
-assert_reported 'the wrapper reports post-expansion argv' 'rails "dbconsole"' \
-  '"command":"rails dbconsole"'
-# The option allowlist is the widest of the wrapper's rules, so a denial from it
-# is the one most likely to be a false positive worth seeing in the trail.
-assert_reported 'an allowlist denial names its rule' 'rake --no-such-option' \
-  '"rule":"option_not_allowed"'
-assert_reported 'and the option that was refused' 'rake --no-such-option' \
-  '"command":"rake --no-such-option"'
-# The identity gate is the denial CI hits, and "who tried to run what" is the
-# whole content of that record.
-cg_env 'CONSOLE_USER='
-assert_reported 'an unidentified session still names the command' 'rails c' \
-  '"rule":"identity_missing"'
-
-# A permitted command is not a denial.
-assert_not_reported 'a permitted command reports nothing' 'rails c'
-
-# Nothing configured means nothing sent -- the state of every app before rollout
-# reaches it.
-: > "$CG_RECORD_LOG"
-cg_run 'bash'
-assert_true 'no endpoint configured means no POST' test ! -s "$CG_RECORD_LOG"
-
 # The command is judged and recorded without the CLI's marker, so a CI denial
 # record reads as the command the caller wrote.
 assert_reported 'the --exit-code marker is not in the record' \
   "psql${CG_MARKER}" '"command":"psql"'
-
-# A record has to survive JSON.parse in datadog-proxy, and the command string is
-# operator-controlled: quotes, backslashes, newlines and control characters all
-# have to be escaped or the whole record is unparseable.
-cg_run_reporting $'psql "a\\"b\\\\c" \t\n z'
-assert_true 'the record is valid JSON even with a hostile command' \
-  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_RECORD_LOG"
-
-# ...and a JSON string has to be valid UTF-8, so a command carrying bytes that
-# are not would cost the whole record -- rule, operator and dyno_id with it.
-cg_run_reporting $'psql \xc3\xa9 \x8b \xff'
-assert_true 'the record is valid JSON even with invalid UTF-8 in the command' \
-  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_RECORD_LOG"
-assert_true 'the record is pure ASCII, whatever bytes went in' \
-  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$CG_RECORD_LOG"
-assert_reported 'a non-ASCII byte is recorded as U+FFFD' \
-  $'psql \xc3\xa9' '"command":"psql \ufffd\ufffd"'
-# The reason is operator-controlled too, and unlike the command it is not vetted
-# by anything upstream. No space in the value: cg_env word-splits.
-cg_env $'CONSOLE_REASON=caf\xc3\xa9-\x8b'
-assert_reported 'and so is one in the reason' 'psql' \
-  '"reason":"caf\ufffd\ufffd-\ufffd"'
-
-# The endpoint URL carries the Basic credential, and an exception from the
-# reporter can quote it, so a failure must be reported as a status and nothing
-# else.
-CG_REPORT_URL="http://reporter:${CG_REPORT_CRED}@127.0.0.1:${CG_RECORDER_PORT}/fail-me"
-cg_run_reporting 'bash'
-if [[ "$CG_OUT" != *"$CG_REPORT_CRED"* && "$CG_OUT" == *"denial not recorded"* ]]; then
-  _cg_report true 'a failed report says so without leaking the credential'
-else
-  _cg_report false 'a failed report says so without leaking the credential' \
-    'expected a "denial not recorded" warning and no credential in it'
-fi
-
-# ============================================================ permit mode records
-# Phase 1 exists to measure what enforcement would block. That is only measurable
-# if the would-be denials are recorded.
-cg_build permit-report CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/permit-report/dyno-metadata.json"
-CG_REPORT_URL="http://reporter:${CG_REPORT_CRED}@127.0.0.1:${CG_RECORDER_PORT}${CG_REPORT_PATH}"
-cg_env_sticky 'CONSOLE_BLOCK_ENFORCE=false'
-assert_reported 'permit mode records the would-be denial' 'bash' '"enforced":false'
-assert_reported 'permit mode records wrapper denials too' 'rails "dbconsole"' \
-  '"enforced":false'
-cg_run_reporting 'bash'
-assert_true 'permit mode still permits the command' test -n "$CG_OUT"
-cg_env_sticky
 
 # ============================================================ compile
 cg_section "bin/compile"
 assert_false 'fails when BUILD_DIR is missing'    "$CG_ROOT/bin/compile"
 assert_false 'fails when BUILD_DIR is unwritable' "$CG_ROOT/bin/compile" /proc/nonexistent/app
 assert_true  'installs the profile script' test -f "$CG_APP/.profile.d/zzz_console_guard.sh"
-assert_true  'installs the rails wrapper'   test -x "$CG_APP/.console-guard/bin/rails"
-assert_true  'installs the rake wrapper'    test -x "$CG_APP/.console-guard/bin/rake"
-assert_true  'installs the bundle wrapper'  test -x "$CG_APP/.console-guard/bin/bundle"
+assert_true  'installs the rails wrapper'  test -x "$CG_APP/.console-guard/bin/rails"
+assert_true  'installs the rake wrapper'   test -x "$CG_APP/.console-guard/bin/rake"
+assert_true  'installs the bundle wrapper' test -x "$CG_APP/.console-guard/bin/bundle"
 assert_true  'installs the policy' test -f "$CG_APP/.console-guard/lib/console_guard.rb"
-assert_true  'installs the denial reporter' \
-  test -f "$CG_APP/.console-guard/lib/console_guard/reporter.rb"
 assert_true  'installs the gate entry point' \
   test -f "$CG_APP/.console-guard/libexec/run_gate.rb"
 assert_true  'installs the wrapper entry point' \
   test -f "$CG_APP/.console-guard/libexec/run_command.rb"
-assert_true  'generated bundle wrapper is valid bash' \
-  bash -n "$CG_APP/.console-guard/bin/bundle"
 assert_false 'leaves no unsubstituted placeholders' \
   grep -rq '@@CG_' "$CG_APP/.profile.d" "$CG_APP/.console-guard"
 assert_true  'generated profile script is valid bash' \
@@ -641,7 +240,7 @@ assert_true  'build log records the guard version' grep -q 'Installing console g
 assert_true  'build log records the resolved ruby' grep -q '^       ruby: /' "$CG_BUILD_LOG"
 
 # Every installed .rb parses. A syntax error reaches a production dyno as a gate
-# that cannot run, which the profile script has to treat as a refusal.
+# that cannot run, which the login shell then has to treat as a refusal.
 _cg_bad_ruby=0
 while IFS= read -r _cg_rb; do
   ruby -c "$_cg_rb" > /dev/null 2>&1 || _cg_bad_ruby=$((_cg_bad_ruby + 1))

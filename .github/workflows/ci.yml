@@ -30,8 +30,9 @@ jobs:
             exit 1
           fi
 
-          # The guard runs with `--disable=gems`, so nothing here may reach for a
-          # gem. Parsed one at a time so the failing file is named.
+          # Parsed one at a time so the failing file is named. `--disable=gems`
+          # because that is how bin/compile parses the guard and how a dyno runs
+          # it -- the flag must not change whether a file is loadable.
           for f in $files; do
             echo "checking $f"
             ruby --disable=gems -c "$f" > /dev/null

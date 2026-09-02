@@ -5,10 +5,10 @@
 #
 #   ruby recorder.rb <log path> <port file>
 #
-# Appends one `PATH <request path>` and one `BODY <request body>` line per
-# request, and answers 202 -- the real endpoint's success code -- unless the
-# request path says to fail, which is how the "a failed report never leaks the
-# credential" test is arranged.
+# Appends one `PATH <request path>`, one `AUTH <credential>` and one
+# `BODY <request body>` line per request, and answers 202 -- the real endpoint's
+# success code -- unless the request path says to fail, which is how the "a
+# failed report never leaks the credential" test is arranged.
 #
 # Deliberately a raw TCPServer: the suite runs on whatever Ruby the stack image
 # has, with no gems and no webrick.
@@ -31,14 +31,19 @@ loop do
     path = request_line.split(' ')[1].to_s
 
     length = 0
+    auth = ''
     while (header = socket.gets)
       break if header.strip.empty?
 
-      length = ::Regexp.last_match(1).to_i if header =~ /\AContent-Length:\s*(\d+)/i
+      case header
+      when /\AContent-Length:\s*(\d+)/i then length = ::Regexp.last_match(1).to_i
+      when /\AAuthorization:\s*(.+)/i then auth = ::Regexp.last_match(1).strip
+      end
     end
     body = length.positive? ? socket.read(length).to_s : ''
 
     log.write("PATH #{path}\n")
+    log.write("AUTH #{auth}\n")
     log.write("BODY #{body}\n")
 
     status = path.include?('fail-me') ? '500 Internal Server Error' : '202 Accepted'
