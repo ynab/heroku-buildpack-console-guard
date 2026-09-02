@@ -26,7 +26,18 @@ jobs:
       options: --user root
     steps:
       - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
-      - name: bash version
-        run: bash --version
+      # The guard's policy is Ruby. On a real dyno it runs the app's own
+      # interpreter, installed by heroku/ruby; the stack images carry none, so
+      # the suite stands the distribution's in for it. The version spread across
+      # the matrix is the point -- it is what pins the guard to stdlib only.
+      - name: Install Ruby
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ruby
+
+      - name: versions
+        run: |
+          bash --version
+          ruby --version
       - name: End-to-end tests
         run: ./test/run_tests.sh

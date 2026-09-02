@@ -11,9 +11,11 @@
 #     the profile script parses
 #   * a fake `rails` and `rake` sit on PATH and report what argv they received,
 #     so a test can tell "blocked" from "ran, with these arguments"
+#   * a recorder listening on loopback stands in for datadog-proxy, so denial
+#     records can be asserted on without a network
 #
 # Everything the guard decides is therefore exercised end to end: bin/compile,
-# the profile script, and the command wrapper.
+# the profile script, the command wrapper and the Ruby policy behind both.
 
 set -uo pipefail
 
@@ -28,14 +30,46 @@ if [[ ! -r /proc/$$/cmdline ]]; then
   exit 1
 fi
 
+# The guard's policy is Ruby, and bin/compile refuses to install without an
+# interpreter. Fail here rather than as a hundred build failures.
+if ! command -v ruby > /dev/null 2>&1; then
+  echo "FATAL: this suite needs a ruby on PATH (the guard's policy is Ruby)." >&2
+  exit 1
+fi
+
 CG_TMP_ROOT="$(mktemp -d)"
 CG_TESTS_RUN=0
 CG_TESTS_FAILED=0
 CG_CURRENT_ENV=""
 CG_STICKY_ENV=""
 
-cg_cleanup() { rm -rf "$CG_TMP_ROOT"; }
+cg_cleanup() {
+  [[ -n "${CG_RECORDER_PID:-}" ]] && kill "$CG_RECORDER_PID" 2> /dev/null
+  rm -rf "$CG_TMP_ROOT"
+}
 trap cg_cleanup EXIT
+
+# ---------------------------------------------------------------- recorder
+
+# Stands in for datadog-proxy. Started once for the suite and shared by every
+# build, because the guard reaches it over loopback rather than through a fake
+# binary on PATH -- the reporter is Net::HTTP now, not curl.
+CG_RECORD_LOG="$CG_TMP_ROOT/records.log"
+: > "$CG_RECORD_LOG"
+ruby "$CG_ROOT/test/lib/recorder.rb" "$CG_RECORD_LOG" "$CG_TMP_ROOT/recorder.port" &
+CG_RECORDER_PID=$!
+
+for _cg_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [[ -s "$CG_TMP_ROOT/recorder.port" ]] && break
+  sleep 0.1
+done
+unset _cg_wait
+
+if [[ ! -s "$CG_TMP_ROOT/recorder.port" ]]; then
+  echo "FATAL: the denial recorder did not start, so no record could be asserted." >&2
+  exit 1
+fi
+CG_RECORDER_PORT="$(cat "$CG_TMP_ROOT/recorder.port")"
 
 # ---------------------------------------------------------------- build
 
@@ -79,29 +113,6 @@ echo "USER=\${CONSOLE_USER-unset}"
 EOF
     chmod 755 "$base/fakebin/$fake"
   done
-
-  # A fake `curl`, so a test can see the denial record the guard POSTs without a
-  # network. Records the request body and the URL it was given. Answers 202 --
-  # the real endpoint's success code -- unless the URL says to fail, which is how
-  # the "a failed report never leaks the credential" test is arranged.
-  CG_CURL_LOG="$base/curl.log"
-  : > "$CG_CURL_LOG"
-  cat > "$base/fakebin/curl" <<EOF
-#!/usr/bin/env bash
-_prev=""
-for _a in "\$@"; do
-  case "\$_prev" in
-    --data-binary) printf 'BODY %s\n' "\$_a" >> "$CG_CURL_LOG" ;;
-  esac
-  _prev="\$_a"
-done
-printf 'ARGV %s\n' "\$*" >> "$CG_CURL_LOG"
-case "\$*" in
-  *fail-me*) exit 7 ;;
-esac
-printf '202'
-EOF
-  chmod 755 "$base/fakebin/curl"
 
   # Stand in for Heroku's own .profile.
   cat > "$CG_APP/.profile" <<EOF
@@ -275,15 +286,16 @@ assert_no_output() {
 # in the real config var, so that a test can prove it never reaches the operator.
 # shellcheck disable=SC2034  # read by run_tests.sh
 CG_REPORT_CRED="s3cr3t-not-for-operators"
-CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/webhooks/console_audit"
+CG_REPORT_PATH="/webhooks/console_audit"
+CG_REPORT_URL="http://reporter:${CG_REPORT_CRED}@127.0.0.1:${CG_RECORDER_PORT}${CG_REPORT_PATH}"
 
 # cg_reported_bodies -- the request bodies seen since the last cg_run.
-cg_reported_bodies() { sed -n 's/^BODY //p' "$CG_CURL_LOG"; }
+cg_reported_bodies() { sed -n 's/^BODY //p' "$CG_RECORD_LOG"; }
 
 # cg_run_reporting <payload> -- as cg_run, with the endpoint configured and the
 # request log cleared first.
 cg_run_reporting() {
-  : > "$CG_CURL_LOG"
+  : > "$CG_RECORD_LOG"
   # shellcheck disable=SC2086  # deliberate word splitting: keep any cg_env values
   cg_env "CONSOLE_LOGGING_DATADOG_PROXY_URL=$CG_REPORT_URL" $CG_CURRENT_ENV
   cg_run "$1"

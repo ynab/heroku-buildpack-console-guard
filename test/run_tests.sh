@@ -500,7 +500,7 @@ cg_env 'HEROKU_APP_NAME=some-app DD_ENV=lies DD_SERVICE=svc DD_VERSION=lies'
 assert_not_reported_field 'sends no version' 'bash' ',"version":'
 cg_run_reporting 'bash'
 assert_true 'goes to the configured endpoint' \
-  grep -q "example.invalid/webhooks/console_audit" "$CG_CURL_LOG"
+  grep -q "^PATH ${CG_REPORT_PATH}$" "$CG_RECORD_LOG"
 
 # The wrapper's denials are half of them, and a trail with only the other half
 # would report every argument-policy block as a clean session.
@@ -525,9 +525,9 @@ assert_not_reported 'a permitted command reports nothing' 'rails c'
 
 # Nothing configured means nothing sent -- the state of every app before rollout
 # reaches it.
-: > "$CG_CURL_LOG"
+: > "$CG_RECORD_LOG"
 cg_run 'bash'
-assert_true 'no endpoint configured means no POST' test ! -s "$CG_CURL_LOG"
+assert_true 'no endpoint configured means no POST' test ! -s "$CG_RECORD_LOG"
 
 # The command is judged and recorded without the CLI's marker, so a CI denial
 # record reads as the command the caller wrote.
@@ -539,15 +539,15 @@ assert_reported 'the --exit-code marker is not in the record' \
 # have to be escaped or the whole record is unparseable.
 cg_run_reporting $'psql "a\\"b\\\\c" \t\n z'
 assert_true 'the record is valid JSON even with a hostile command' \
-  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_CURL_LOG"
+  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_RECORD_LOG"
 
 # ...and a JSON string has to be valid UTF-8, so a command carrying bytes that
 # are not would cost the whole record -- rule, operator and dyno_id with it.
 cg_run_reporting $'psql \xc3\xa9 \x8b \xff'
 assert_true 'the record is valid JSON even with invalid UTF-8 in the command' \
-  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_CURL_LOG"
+  perl -MJSON::PP -ne 'decode_json($1) if /^BODY (.*)$/' "$CG_RECORD_LOG"
 assert_true 'the record is pure ASCII, whatever bytes went in' \
-  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$CG_CURL_LOG"
+  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$CG_RECORD_LOG"
 assert_reported 'a non-ASCII byte is recorded as U+FFFD' \
   $'psql \xc3\xa9' '"command":"psql \ufffd\ufffd"'
 # The reason is operator-controlled too, and unlike the command it is not vetted
@@ -556,9 +556,10 @@ cg_env $'CONSOLE_REASON=caf\xc3\xa9-\x8b'
 assert_reported 'and so is one in the reason' 'psql' \
   '"reason":"caf\ufffd\ufffd-\ufffd"'
 
-# The endpoint URL carries the Basic credential. curl reports failures by quoting
-# the URL, so its stderr must never reach the operator.
-CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/fail-me"
+# The endpoint URL carries the Basic credential, and an exception from the
+# reporter can quote it, so a failure must be reported as a status and nothing
+# else.
+CG_REPORT_URL="http://reporter:${CG_REPORT_CRED}@127.0.0.1:${CG_RECORDER_PORT}/fail-me"
 cg_run_reporting 'bash'
 if [[ "$CG_OUT" != *"$CG_REPORT_CRED"* && "$CG_OUT" == *"denial not recorded"* ]]; then
   _cg_report true 'a failed report says so without leaking the credential'
@@ -571,7 +572,7 @@ fi
 # Phase 1 exists to measure what enforcement would block. That is only measurable
 # if the would-be denials are recorded.
 cg_build permit-report CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/permit-report/dyno-metadata.json"
-CG_REPORT_URL="https://reporter:${CG_REPORT_CRED}@example.invalid/webhooks/console_audit"
+CG_REPORT_URL="http://reporter:${CG_REPORT_CRED}@127.0.0.1:${CG_RECORDER_PORT}${CG_REPORT_PATH}"
 cg_env_sticky 'CONSOLE_BLOCK_ENFORCE=false'
 assert_reported 'permit mode records the would-be denial' 'bash' '"enforced":false'
 assert_reported 'permit mode records wrapper denials too' 'rails "dbconsole"' \
@@ -588,9 +589,13 @@ assert_true  'installs the profile script' test -f "$CG_APP/.profile.d/zzz_conso
 assert_true  'installs the rails wrapper'   test -x "$CG_APP/.console-guard/bin/rails"
 assert_true  'installs the rake wrapper'    test -x "$CG_APP/.console-guard/bin/rake"
 assert_true  'installs the bundle wrapper'  test -x "$CG_APP/.console-guard/bin/bundle"
-assert_true  'installs the denial reporter' test -f "$CG_APP/.console-guard/lib/denial_report.sh"
-assert_true  'generated denial reporter is valid bash' \
-  bash -n "$CG_APP/.console-guard/lib/denial_report.sh"
+assert_true  'installs the policy' test -f "$CG_APP/.console-guard/lib/console_guard.rb"
+assert_true  'installs the denial reporter' \
+  test -f "$CG_APP/.console-guard/lib/console_guard/reporter.rb"
+assert_true  'installs the gate entry point' \
+  test -f "$CG_APP/.console-guard/libexec/run_gate.rb"
+assert_true  'installs the wrapper entry point' \
+  test -f "$CG_APP/.console-guard/libexec/run_command.rb"
 assert_true  'generated bundle wrapper is valid bash' \
   bash -n "$CG_APP/.console-guard/bin/bundle"
 assert_false 'leaves no unsubstituted placeholders' \
@@ -599,5 +604,20 @@ assert_true  'generated profile script is valid bash' \
   bash -n "$CG_APP/.profile.d/zzz_console_guard.sh"
 assert_true  'generated wrapper is valid bash' bash -n "$CG_APP/.console-guard/bin/rails"
 assert_true  'build log records the guard version' grep -q 'Installing console guard' "$CG_BUILD_LOG"
+assert_true  'build log records the resolved ruby' grep -q '^       ruby: /' "$CG_BUILD_LOG"
+
+# Every installed .rb parses. A syntax error reaches a production dyno as a gate
+# that cannot run, which the profile script has to treat as a refusal.
+_cg_bad_ruby=0
+while IFS= read -r _cg_rb; do
+  ruby -c "$_cg_rb" > /dev/null 2>&1 || _cg_bad_ruby=$((_cg_bad_ruby + 1))
+done < <(find "$CG_APP/.console-guard" -name '*.rb')
+assert_true 'every generated ruby file parses' test "$_cg_bad_ruby" -eq 0
+unset _cg_bad_ruby _cg_rb
+
+# bin/compile cannot install a guard it has no interpreter for, and a green build
+# with no guard is the worst outcome available.
+assert_false 'fails when no ruby can be resolved' \
+  env -i PATH=/nonexistent "$CG_ROOT/bin/compile" "$CG_TMP_ROOT/no-ruby"
 
 cg_finish

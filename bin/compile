@@ -42,18 +42,84 @@ if [[ -z "$CG_VERSION" ]]; then
 fi
 [[ -n "$CG_VERSION" ]] || CG_VERSION="unknown"
 
+# ---------- resolve the Ruby interpreter ----------
+# The guard's policy is Ruby, and it must be reached by absolute path: PATH is
+# `heroku run -e`-settable, so a lookup inside the dyno would let an operator
+# hand the gate its own interpreter.
+#
+# CG_RUBY_BUILD is the interpreter as it can be run here, on the build dyno.
+# CG_RUBY is the same interpreter as the running dyno will see it -- the slug is
+# built in BUILD_DIR and extracted at /app, so a vendored Ruby changes path
+# between the two and one from the stack image does not.
+CG_RUBY=""
+CG_RUBY_BUILD=""
+
+resolve_ruby() {
+  local override candidate
+  override="$(env_var CONSOLE_GUARD_RUBY "")"
+  if [[ -n "$override" ]]; then
+    CG_RUBY="$override"
+    CG_RUBY_BUILD="$override"
+    return 0
+  fi
+
+  # Preferred: a Ruby inside the slug, so the guard runs on the same interpreter
+  # the app does and cannot be broken by a stack image change.
+  for candidate in "$BUILD_DIR"/.heroku/ruby/bin/ruby \
+                   "$BUILD_DIR"/vendor/ruby-*/bin/ruby \
+                   "$BUILD_DIR"/vendor/ruby/bin/ruby \
+                   "$BUILD_DIR"/bin/ruby; do
+    if [[ -x "$candidate" ]]; then
+      CG_RUBY_BUILD="$candidate"
+      CG_RUBY="/app${candidate#"$BUILD_DIR"}"
+      return 0
+    fi
+  done
+
+  # Otherwise a Ruby from the stack image, which is at the same absolute path at
+  # run time as it is here.
+  candidate="$(command -v ruby 2>/dev/null || true)"
+  if [[ -n "$candidate" && -x "$candidate" ]]; then
+    CG_RUBY_BUILD="$candidate"
+    CG_RUBY="$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+if ! resolve_ruby; then
+  {
+    echo "console-guard: no Ruby interpreter found, so the guard cannot be installed."
+    echo "               Add this buildpack after heroku/ruby, or set the"
+    echo "               CONSOLE_GUARD_RUBY config var to an absolute path that"
+    echo "               will exist inside the dyno."
+  } >&2
+  exit 1
+fi
+
 # ---------- install ----------
 
 render() {
   local src="$1" dest="$2"
   test -s "$src" || { echo "console-guard: missing source file $src" >&2; exit 1; }
+  mkdir -p "$(dirname "$dest")"
   sed -e "s|@@CG_VERSION@@|${CG_VERSION}|g" \
       -e "s|@@CG_DYNO_METADATA_FILE@@|${CG_DYNO_METADATA_FILE}|g" \
+      -e "s|@@CG_RUBY@@|${CG_RUBY}|g" \
       "$src" > "$dest"
   test -s "$dest" || { echo "console-guard: failed to write $dest" >&2; exit 1; }
   # Catch a broken substitution or an editing mistake at build time rather than
   # in a production dyno.
-  bash -n "$dest" || { echo "console-guard: $dest is not valid bash" >&2; exit 1; }
+  case "$dest" in
+    *.rb)
+      "$CG_RUBY_BUILD" -c "$dest" > /dev/null ||
+        { echo "console-guard: $dest is not valid ruby" >&2; exit 1; }
+      ;;
+    *)
+      bash -n "$dest" || { echo "console-guard: $dest is not valid bash" >&2; exit 1; }
+      ;;
+  esac
   if grep -q '@@CG_' "$dest"; then
     echo "console-guard: unsubstituted placeholder left in $dest" >&2
     exit 1
@@ -62,41 +128,48 @@ render() {
 
 echo "-----> Installing console guard ${CG_VERSION}"
 
-# Sourced by both halves of the guard, so it belongs beside them rather than in
-# either one. Installed first, before the two scripts that look for it.
-LIB_DIR="$BUILD_DIR/.console-guard/lib"
-mkdir -p "$LIB_DIR"
-render "$BUILDPACK_DIR/guard/denial_report.sh" "$LIB_DIR/denial_report.sh"
-chmod 644 "$LIB_DIR/denial_report.sh"
+GUARD_DIR="$BUILD_DIR/.console-guard"
+
+# The policy, and the two entry points that run it. Discovered rather than
+# listed, so splitting a class into another file cannot silently drop it from
+# the slug and leave a dyno with half a guard.
+CG_RUBY_FILES=0
+while IFS= read -r src; do
+  render "$src" "$GUARD_DIR/${src#"$BUILDPACK_DIR"/guard/}"
+  chmod 644 "$GUARD_DIR/${src#"$BUILDPACK_DIR"/guard/}"
+  CG_RUBY_FILES=$((CG_RUBY_FILES + 1))
+done < <(find "$BUILDPACK_DIR/guard/lib" "$BUILDPACK_DIR/guard/libexec" \
+              -type f -name '*.rb' | sort)
+
+if (( CG_RUBY_FILES == 0 )); then
+  echo "console-guard: no policy files found to install" >&2
+  exit 1
+fi
 
 # Named zzz_ so it loads last, after every other buildpack's profile script.
 # CONSOLE_AUDIT_ENABLED must be the final exported value, and the PATH entry that
 # reaches the command wrapper must not be undone by a later script.
-mkdir -p "$BUILD_DIR/.profile.d"
 render "$BUILDPACK_DIR/profile/console_guard.sh" \
        "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
 chmod 644 "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
 
-# The command wrapper. Installed under all three names; it dispatches on $0. This
-# is where all argument policy lives, because it is the first point at which the
-# shell has finished expanding the operator's command.
+# The command wrapper. Installed under all three names; it dispatches on $0.
 #
 # `bundle` is one of them because Heroku's Ruby buildpack rewrites `rake <task>`
 # on a one-off dyno to `bundle exec rake <task>`, and `bundle exec` then puts
 # Bundler's own bin directory ahead of this one on PATH -- so the rails/rake
 # wrapper is never reached and policy has to be applied by the `bundle` wrapper
 # itself.
-SHIM_DIR="$BUILD_DIR/.console-guard/bin"
-mkdir -p "$SHIM_DIR"
-render "$BUILDPACK_DIR/guard/shim.sh" "$SHIM_DIR/rails"
-cp "$SHIM_DIR/rails" "$SHIM_DIR/rake"
-cp "$SHIM_DIR/rails" "$SHIM_DIR/bundle"
-chmod 755 "$SHIM_DIR/rails" "$SHIM_DIR/rake" "$SHIM_DIR/bundle"
+render "$BUILDPACK_DIR/guard/shim.sh" "$GUARD_DIR/bin/rails"
+cp "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/rake"
+cp "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/bundle"
+chmod 755 "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/rake" "$GUARD_DIR/bin/bundle"
 
 {
   echo "profile script: .profile.d/zzz_console_guard.sh"
   echo "command wrapper: .console-guard/bin/{rails,rake,bundle}"
-  echo "denial reporter: .console-guard/lib/denial_report.sh"
+  echo "policy: .console-guard/lib/console_guard/ (${CG_RUBY_FILES} ruby files)"
+  echo "ruby: ${CG_RUBY}"
   echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
   echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"
 } | indent
