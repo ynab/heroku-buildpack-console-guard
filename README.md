@@ -10,10 +10,11 @@ needs an attributable record of who ran what, and why.
 
 ## What it does
 
-Once added to an app, the buildpack installs two things:
+Once added to an app, the buildpack installs three things:
 
 1. a `.profile.d` script that runs inside every one-off dyno, before the operator's command
 2. a wrapper for `rails`, `rake` and `bundle` on `PATH`, which the profile script makes reachable
+3. the policy both of them apply, as Ruby under `.console-guard/lib/console_guard/`
 
 Together they:
 
@@ -65,14 +66,58 @@ So the profile script checks only what is sound to check on a raw string:
 | Compound statements and redirections | Presence of a character in the raw string is exactly the question |
 | `argv[0]` is literally `rails`, `rake` or `bundle` | Quoting or expanding it makes it stop matching, so it fails closed |
 
-Everything about the **arguments** lives in the command wrapper
-(`guard/shim.sh`, installed as `.console-guard/bin/{rails,rake,bundle}`), which runs after the shell has
-finished expanding and therefore sees the real `argv`. Because `argv[0]` is guaranteed to be
-literally `rails`, `rake` or `bundle`, and because the wrapper directory is prepended to `PATH`, control
-always reaches the wrapper.
+Everything about the **arguments** lives in the command wrapper (`ConsoleGuard::Command`, reached
+through `.console-guard/bin/{rails,rake,bundle}`), which runs after the shell has finished expanding
+and therefore sees the real `argv`. Because `argv[0]` is guaranteed to be literally `rails`, `rake`
+or `bundle`, and because the wrapper directory is prepended to `PATH`, control always reaches the
+wrapper.
 
-**Add argument rules to the wrapper, not to the profile script.** A rule added to the profile script
-looks like it works and is bypassable with one quote character.
+**Add argument rules to the wrapper, not to the gate.** A rule added to the gate looks like it works
+and is bypassable with one quote character.
+
+## Where the code lives
+
+The policy is Ruby. The two shell files are what is left over after that move — the things only the
+login shell itself can do, because a child process cannot reach into its parent.
+
+| File | What it is |
+|---|---|
+| `profile/console_guard.sh` | Sourced into the login shell. Runs the gate, then acts on its exit status: prepend the wrapper to `PATH`, `unset EDITOR VISUAL`, export `CONSOLE_AUDIT_ENABLED`, or `exit 1` |
+| `guard/shim.sh` | Installed as `rails`, `rake` and `bundle`. Execs the wrapper, passing the name it was invoked under — `$0` is what distinguishes the three and is lost once Ruby takes over |
+| `guard/lib/console_guard/gate.rb` | `ConsoleGuard::Gate` — the profile half's policy |
+| `guard/lib/console_guard/command.rb` | `ConsoleGuard::Command` — all argument policy |
+| `guard/lib/console_guard/reporter.rb` | The denial record, and where it goes |
+| `guard/lib/console_guard/dyno.rb` | Which dyno this is, and what therefore applies to it |
+| `guard/libexec/run_gate.rb`, `run_command.rb` | The two entry points the shell files exec |
+
+The gate reports back to the login shell through its **exit status**, because that is the only
+channel a child has to a parent that must then modify its own environment:
+
+| Status | Meaning |
+|---|---|
+| `0` | Not a dyno this applies to |
+| `10` | Audited, not gated (scheduler, release) |
+| `20` | Gated, and permitted |
+| `21` | Gated and permitted, and permit mode must supply the placeholder operator |
+| `1` | Denied. The banner is printed, the record sent and the `--exit-code` marker emitted already |
+
+### The guard's own interpreter
+
+Running policy in Ruby adds one attack surface that a shell script does not have: the operator can
+set `heroku run -e` variables that choose what the interpreter loads before the guard's first line
+runs. All three are closed, and the tests pin each one.
+
+| Vector | Closed by |
+|---|---|
+| `PATH` — which `ruby` | Both shell files invoke an **absolute** path, resolved at build time and baked in. Never a `PATH` lookup, and `guard/shim.sh` uses `#!/bin/bash` rather than `/usr/bin/env bash` for the same reason |
+| `RUBYOPT` — what it requires first | `--disable=rubyopt` on the interpreter's command line |
+| RubyGems, `GEM_HOME`, `GEM_PATH` | `--disable=gems`. The guard uses stdlib only, so nothing is lost |
+| `RUBYLIB` — what answers a stdlib `require` | Its entries are removed from `$LOAD_PATH` before the first `require`. The guard's own files are reached with `require_relative`, which never consults `$LOAD_PATH` |
+
+The interpreter is resolved by `bin/compile`, which prefers one inside the slug (so the guard runs on
+the same Ruby the app does) and falls back to the stack image's. **The build fails if it cannot find
+one** — a green build with no guard installed is the worst outcome available. Override with the
+`CONSOLE_GUARD_RUBY` config var if the app's Ruby is somewhere unusual.
 
 ## Command policy
 
@@ -347,10 +392,15 @@ who was just blocked. The price is fidelity: `rails runner "puts 'héllo'"` reco
 characters where the `é` was. Enough to see that something non-ASCII was there, which is all the
 `command` field is for.
 
+The record is sent with `Net::HTTP` from stdlib. The Basic credential is lifted out of the URL's
+userinfo and set as a header, because `Net::HTTP` — unlike `curl`, which this used to shell out to —
+does not do that itself, and because `URI.parse` is stricter about what a userinfo may contain than
+whatever the proxy issued is guaranteed to be.
+
 Reporting is **fail-open and best effort**: one attempt, a 4-second ceiling, no retry, and a failure
 warns on stderr without holding up the denial. Refusing the command is the control; recording it must
-not be able to block that. A failure is reported as a status code — never as the URL, which carries
-the credential.
+not be able to block that. A failure is reported as a status code, or as the exception's class —
+never as its message, which can quote the URL, and never as the URL, which carries the credential.
 
 It is also **not sufficient on its own.** The URL variable is inherited by the one-off dyno, so an
 operator who knows about this can suppress their own denial record with
@@ -384,7 +434,8 @@ records the installed version:
 -----> Installing console guard 7f1e0d8
        profile script: .profile.d/zzz_console_guard.sh
        command wrapper: .console-guard/bin/{rails,rake,bundle}
-       denial reporter: .console-guard/lib/denial_report.sh
+       policy: .console-guard/lib/console_guard/ (10 ruby files)
+       ruby: /app/.heroku/ruby/bin/ruby
        dyno metadata file: /etc/heroku/dyno
        enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time
 ```
@@ -503,13 +554,14 @@ Set as a config var on the app, and read at **build** time:
 |---|---|---|
 | `CONSOLE_GUARD_DYNO_METADATA_FILE` | No | Where to read the dyno name and UUID. Defaults to `/etc/heroku/dyno`. An unreadable path degrades to the `$DYNO` fallback |
 | `CONSOLE_GUARD_VERSION` | No | Overrides the version string in build logs and denial messages. Defaults to the buildpack's short commit SHA |
+| `CONSOLE_GUARD_RUBY` | No | Absolute path to the interpreter the guard runs on, as the *dyno* will see it. Defaults to a Ruby in the slug, then to the stack image's. The build fails if none is found |
 
 Set by the buildpack itself:
 
 | Variable | Value | Notes |
 |---|---|---|
 | `CONSOLE_AUDIT_ENABLED` | `true` | Exported on `run`, `scheduler` and `release` dynos, in both enforcement modes. Activates the audit hook in the companion gem. Because `.profile.d` scripts run *after* config vars and `-e` vars are applied, an operator cannot disable it via `-e`. In local and development environments, where this buildpack does not run, set it manually to opt in |
-| `CONSOLE_GUARD_DYNO_ID` | dyno UUID | Exported on gated dynos only, from the dyno metadata file, so the command wrapper's denial records carry a join key `-e` cannot forge. Empty when metadata is disabled |
+| `CONSOLE_GUARD_RUBY` | absolute path | Exported on gated dynos, so the command wrapper runs on the same interpreter the gate did. Set after `-e` is applied, so an operator-supplied value is overwritten rather than trusted |
 | `PATH` | prepended | With `.console-guard/bin`, so `rails`, `rake` and `bundle` resolve to the command wrapper |
 | `EDITOR`, `VISUAL` | unset | They are a shell escape via `rails credentials:edit` |
 
@@ -537,8 +589,9 @@ They are audited but not gated. See [Limitations](#limitations).
 ## Development
 
 ```
-./test/run_tests.sh                 # end-to-end suite, no dependencies beyond bash + coreutils
+./test/run_tests.sh                 # end-to-end suite; needs Linux (procfs) and a ruby
 shellcheck -s bash bin/* profile/*.sh guard/*.sh test/*.sh test/lib/*.sh
+ruby --disable=gems -c guard/lib/console_guard/*.rb
 ```
 
 The suite compiles the buildpack into a temporary build directory and runs payloads through a login
@@ -546,12 +599,15 @@ shell arranged to look like a one-off dyno — `$HOME` is the build directory, `
 `.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake`/`bundle` on `PATH` reports the `argv` it
 received. A test therefore distinguishes "blocked" from "ran, with exactly these arguments".
 
-Every bypass fixed in this repo has a regression case, and CI runs the suite inside the
-`heroku/heroku:22` and `heroku/heroku:24` stack images as well as on `ubuntu-latest`.
+Every bypass fixed in this repo has a regression case, and CI runs the suite inside every supported
+`heroku/heroku` stack image. The stack images carry no Ruby, so the suite installs the
+distribution's and the guard runs on that — the version spread across the matrix is what keeps the
+policy honest about using stdlib only.
 
-When adding a rule, put it in `guard/shim.sh` if it is about the command's **arguments** and in
-`profile/console_guard.sh` only if it is about the environment or the raw command string. See
-[How the two halves fit together](#how-the-two-halves-fit-together).
+When adding a rule, put it in `ConsoleGuard::Command` if it is about the command's **arguments** and
+in `ConsoleGuard::Gate` only if it is about the environment or the raw command string. See
+[How the two halves fit together](#how-the-two-halves-fit-together) and
+[Where the code lives](#where-the-code-lives).
 
 ## Limitations
 
