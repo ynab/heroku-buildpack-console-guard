@@ -269,6 +269,8 @@ assert_blocked 'bundle exec rails -e 1'        'allowlisted'
 # The denial names what is permitted, so a false positive is self-service.
 assert_output 'the denial lists the permitted options' \
   'rake --no-such-option' '--tasks'
+assert_output 'the denial names the option it refused' \
+  'rake --no-such-option' '`rake --no-such-option` is not permitted'
 assert_output 'the denial names the command it applies to' \
   'rails db:migrate --no-such-option' 'Permitted after `rails db:migrate`'
 
@@ -506,6 +508,12 @@ assert_reported 'a wrapper denial is POSTed too' 'rails "dbconsole"' \
   '"rule":"raw_database_session"'
 assert_reported 'the wrapper reports post-expansion argv' 'rails "dbconsole"' \
   '"command":"rails dbconsole"'
+# The option allowlist is the widest of the wrapper's rules, so a denial from it
+# is the one most likely to be a false positive worth seeing in the trail.
+assert_reported 'an allowlist denial names its rule' 'rake --no-such-option' \
+  '"rule":"option_not_allowed"'
+assert_reported 'and the option that was refused' 'rake --no-such-option' \
+  '"command":"rake --no-such-option"'
 # The identity gate is the denial CI hits, and "who tried to run what" is the
 # whole content of that record.
 cg_env 'CONSOLE_USER='

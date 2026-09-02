@@ -405,13 +405,13 @@ for _cg_arg in ${_cg_policy_args[@]+"${_cg_policy_args[@]}"}; do
     _cg_allowed_lines+=("$_cg_line")
   done < <(_cg_wrap_allowed)
 
-  _cg_deny "\`${_cg_policy_prog} ${_cg_arg}\` is not permitted on one-off dynos." \
+  _cg_deny option_not_allowed \
+           "\`${_cg_policy_prog} ${_cg_arg}\` is not permitted on one-off dynos." \
            "" \
            "${_cg_allow_why[@]}" \
            "" \
            "Permitted after \`${_cg_context}\`:${_cg_allow_extras:+ $_cg_allow_extras}" \
            "${_cg_allowed_lines[@]}" \
-           "" \
            "" \
            "Short options are matched whole, so pass them separately rather" \
            "than bundled into one argument."

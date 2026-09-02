@@ -306,7 +306,7 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
   `wrapper_missing`, `identity_missing`, `command_unreadable`, `command_not_bash_c`,
   `compound_statement`, `command_not_allowed`, `bundle_not_exec`, `bundle_exec_not_allowed`,
   `raw_database_session`, `editor_escape`, `stdin_program`, `dash_c_flag`, `sandbox_console`,
-  `runner_file`.
+  `runner_file`, `option_not_allowed`.
 - **`enforced`** is `false` in [permit mode](#phased-rollout). Phase 1 exists to measure what
   enforcement would block, and that is only measurable if the would-be denials are recorded, so they
   are sent in both modes.
