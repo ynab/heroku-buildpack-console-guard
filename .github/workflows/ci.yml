@@ -12,6 +12,31 @@ permissions:
   contents: read
 
 jobs:
+  # Files are discovered rather than listed here too, so adding a policy file
+  # cannot silently drop it from the lint.
+  ruby-syntax:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
+
+      - name: ruby -c
+        run: |
+          ruby --version
+
+          files=$(git ls-files '*.rb')
+
+          if [ -z "$files" ]; then
+            echo "ruby-syntax: no ruby files discovered, so this job proves nothing" >&2
+            exit 1
+          fi
+
+          # The guard runs with `--disable=gems`, so nothing here may reach for a
+          # gem. Parsed one at a time so the failing file is named.
+          for f in $files; do
+            echo "checking $f"
+            ruby --disable=gems -c "$f" > /dev/null
+          done
+
   shellcheck:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
