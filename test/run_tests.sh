@@ -407,6 +407,40 @@ assert_ran 'rails c'
 # deployed guard.
 assert_output 'denials name the guard version' 'bash' 'console-guard '
 
+cg_section "the operator cannot choose the guard's interpreter"
+# The policy is Ruby now, so three `heroku run -e` variables are code injection
+# into the thing vetting the command: PATH (which interpreter), RUBYOPT (what it
+# requires first) and RUBYLIB (what answers a stdlib require). None of them may
+# reach it.
+mkdir -p "$CG_APP/hostile"
+cat > "$CG_APP/hostile/ruby" <<'EOF'
+#!/bin/bash
+echo "HOSTILE RUBY RAN"
+exit 0
+EOF
+chmod 755 "$CG_APP/hostile/ruby"
+# A stdlib name the guard requires. Loading this would both announce itself and
+# leave JSON undefined, so the guard would die rather than pass anything.
+echo 'puts "HOSTILE JSON RAN"' > "$CG_APP/hostile/json.rb"
+
+# Exit 0 from the gate means "not a dyno this applies to", so a hostile ruby that
+# simply succeeds would be a complete bypass -- the profile script would leave
+# PATH alone and never gate anything.
+cg_env "PATH=$CG_APP/hostile:/usr/local/bin:/usr/bin:/bin"
+assert_blocked 'psql' 'not permitted'
+cg_env "PATH=$CG_APP/hostile:/usr/local/bin:/usr/bin:/bin"
+assert_no_output 'a ruby earlier on PATH is not the one that runs' 'psql' 'HOSTILE RUBY RAN'
+cg_env 'RUBYOPT=-rhostile_payload'
+assert_blocked 'psql' 'not permitted'
+cg_env 'RUBYOPT=-rhostile_payload' ; assert_ran 'rails c'
+cg_env "RUBYLIB=$CG_APP/hostile" ; assert_ran 'rails c'
+cg_env "RUBYLIB=$CG_APP/hostile"
+assert_no_output 'RUBYLIB cannot answer a stdlib require' 'rails c' 'HOSTILE JSON RAN'
+# The wrapper is a separate process with its own interpreter to choose, so the
+# same three have to be closed there too.
+cg_env "RUBYLIB=$CG_APP/hostile" ; assert_blocked 'rails dbconsole' 'raw database session'
+cg_env 'RUBYOPT=-rhostile_payload' ; assert_blocked 'rails dbconsole' 'raw database session'
+
 # ============================================================ dyno metadata
 cg_section "regression (finding 4): \$DYNO cannot be spoofed when metadata exists"
 cg_build metadata CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/metadata/dyno-metadata.json"
