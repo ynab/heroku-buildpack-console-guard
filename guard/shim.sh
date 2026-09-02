@@ -193,20 +193,26 @@ done
 # Scoped to `console`/`c` rather than applied to every argv, because `-s` is
 # `rake`'s silent flag and legitimate there. `--no-sandbox` must keep working.
 #
+# Thor parses `--sandbox=true` as well as the bare flag, so the `=` forms are
+# denied whatever value they carry. Enumerating Thor's boolean vocabulary would
+# be modelling the parser, which is the thing the option allowlist below exists
+# to avoid; `--no-sandbox` is the spelling that opts out.
+#
 # The console_audit gem sets Rails' own `config.disable_sandbox = true` when
 # auditing is active, which is a second layer over the same dynos: it holds even
 # if the command never reaches this wrapper.
 if [[ "$_cg_policy_prog" == "rails" && ( "$_cg_sub" == "console" || "$_cg_sub" == "c" ) ]]; then
   for _cg_arg in "${_cg_policy_args[@]:1}"; do
     case "$_cg_arg" in
-      --sandbox|-s)
+      --sandbox|--sandbox=*|-s|-s=*)
         _cg_deny "\`rails ${_cg_sub} ${_cg_arg}\` is not permitted on one-off dynos." \
                  "" \
                  "A sandboxed console rolls back its transaction on exit, which" \
                  "discards the queued audit records with it -- the session would" \
                  "run entirely unlogged." \
                  "" \
-                 "Use \`rails ${_cg_sub}\` instead. It is audited."
+                 "Use \`rails ${_cg_sub}\` instead. It is audited." \
+                 "\`--no-sandbox\` is permitted and means the same thing."
         ;;
     esac
   done

@@ -118,7 +118,7 @@ duplicates every rule rather than delegating.
 | `rails runner --file <f>`, or any `runner` argument that exists on disk | Same shape — the command string names a file rather than the code that runs |
 | Any argument beginning with `-` that is not on the option allowlist | See [Option allowlist](#option-allowlist) below |
 | `-c` in any argument position | Reaches a shell (`bash -c`). No legitimate `rails`/`rake` invocation uses it. `rails c` — the console shorthand — is unaffected, because that argument is `c`, not `-c` |
-| `rails console --sandbox` / `-s` (console only) | The sandbox transaction is rolled back on exit, and a database-backed ActiveJob queue on the primary database puts the audit enqueue inside it — so the rollback discards the audit trail and the session runs entirely unlogged ([console1984#91](https://github.com/basecamp/console1984/issues/91)). Scoped to `console`/`c`, because `-s` is `rake`'s silent flag; `--no-sandbox` is unaffected |
+| `rails console --sandbox` / `-s` (console only) | The sandbox transaction is rolled back on exit, and a database-backed ActiveJob queue on the primary database puts the audit enqueue inside it — so the rollback discards the audit trail and the session runs entirely unlogged ([console1984#91](https://github.com/basecamp/console1984/issues/91)). Scoped to `console`/`c`, because `-s` is `rake`'s silent flag. Thor also takes `--sandbox=<value>`, so the `=` forms are refused whatever they carry, `false` included — `--no-sandbox` is the spelling that opts out, and is unaffected |
 
 Because these are checked after expansion, the quoted, variable and glob spellings of each are
 blocked too: `rails "dbconsole"`, `rails "credentials:edit"`, `rails runner "-"` and

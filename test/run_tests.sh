@@ -201,6 +201,21 @@ assert_blocked 'rails console -s'               'unlogged'
 assert_blocked 'bundle exec rails c --sandbox'  'unlogged'
 assert_blocked 'rails c "--sandbox"'            'unlogged'
 cg_env 'S=--sandbox'            ; assert_blocked 'rails c $S'           'unlogged'
+# Thor takes `--flag=value` for a boolean, so the `=` forms have to be denied by
+# this rule and not merely by the option allowlist below -- otherwise adding a
+# sandbox-ish entry to the console's allowlist reopens the bypass with the whole
+# suite green. Denied whatever the value is, `false` included: deciding which
+# values Thor reads as true is modelling the parser.
+assert_blocked 'rails c "--sandbox=true"'       'unlogged'
+assert_blocked 'rails console "--sandbox=true"' 'unlogged'
+assert_blocked 'rails c "--sandbox=1"'          'unlogged'
+assert_blocked 'rails c "--sandbox=false"'      'unlogged'
+assert_blocked 'rails c "-s=true"'              'unlogged'
+assert_blocked 'bundle exec rails c "--sandbox=true"' 'unlogged'
+cg_env 'S=--sandbox=true'       ; assert_blocked 'rails c $S'           'unlogged'
+# The denial points at the spelling that works.
+assert_output 'the sandbox denial names --no-sandbox' \
+  'rails c "--sandbox=true"' '`--no-sandbox` is permitted'
 # Scoped to the console: -s is rake's silent flag, and --no-sandbox is the safe
 # direction. Neither is collateral damage.
 assert_ran 'rake -s some:task'
