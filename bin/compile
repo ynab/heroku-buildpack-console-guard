@@ -1,12 +1,96 @@
 #!/usr/bin/env bash
 # Usage: bin/compile BUILD_DIR CACHE_DIR ENV_DIR
-BUILD_DIR=$1
+#
+# Fails the build rather than producing an app without a working gate. A green
+# build with no guard installed is the worst outcome available here, so every
+# step is checked and the resolved configuration is echoed into the build log.
+
+set -euo pipefail
+
+BUILD_DIR=${1:?BUILD_DIR is required}
+# shellcheck disable=SC2034  # CACHE_DIR is part of the buildpack API, unused here
+CACHE_DIR=${2:-}
+ENV_DIR=${3:-}
+
 BUILDPACK_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
-echo "-----> Installing console guard profile script"
-mkdir -p "$BUILD_DIR/.profile.d"
+indent() { sed 's/^/       /'; }
+
+# Reads a config var from ENV_DIR, which Heroku populates with the app's config
+# vars at build time.
+env_var() {
+  local name="$1" default="${2:-}"
+  if [[ -n "$ENV_DIR" && -f "$ENV_DIR/$name" ]]; then
+    cat "$ENV_DIR/$name"
+  else
+    printf '%s' "$default"
+  fi
+}
+
+# ---------- resolve configuration ----------
+
+# Escape hatch in case Heroku changes where dyno metadata is written. Defaults to
+# the documented location; an unreadable path degrades to the $DYNO fallback.
+CG_DYNO_METADATA_FILE="$(env_var CONSOLE_GUARD_DYNO_METADATA_FILE /etc/heroku/dyno)"
+
+# Recorded in every denial message so a report from an operator identifies the
+# deployed guard exactly. The README asks apps to pin a commit SHA; this closes
+# the loop by making the pinned SHA visible in the build log.
+CG_VERSION="$(env_var CONSOLE_GUARD_VERSION "")"
+if [[ -z "$CG_VERSION" ]]; then
+  CG_VERSION="$(git -C "$BUILDPACK_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+fi
+[[ -n "$CG_VERSION" ]] || CG_VERSION="unknown"
+
+# ---------- install ----------
+
+render() {
+  local src="$1" dest="$2"
+  test -s "$src" || { echo "console-guard: missing source file $src" >&2; exit 1; }
+  sed -e "s|@@CG_VERSION@@|${CG_VERSION}|g" \
+      -e "s|@@CG_DYNO_METADATA_FILE@@|${CG_DYNO_METADATA_FILE}|g" \
+      "$src" > "$dest"
+  test -s "$dest" || { echo "console-guard: failed to write $dest" >&2; exit 1; }
+  # Catch a broken substitution or an editing mistake at build time rather than
+  # in a production dyno.
+  bash -n "$dest" || { echo "console-guard: $dest is not valid bash" >&2; exit 1; }
+  if grep -q '@@CG_' "$dest"; then
+    echo "console-guard: unsubstituted placeholder left in $dest" >&2
+    exit 1
+  fi
+}
+
+echo "-----> Installing console guard ${CG_VERSION}"
+
 # Named zzz_ so it loads last, after every other buildpack's profile script.
-# CONSOLE_AUDIT_ENABLED must be the final exported value, and the gate must not
-# be bypassable by a later script.
-cp "$BUILDPACK_DIR/profile/console_guard.sh" "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
+# CONSOLE_AUDIT_ENABLED must be the final exported value, and the PATH entry that
+# reaches the command wrapper must not be undone by a later script.
+mkdir -p "$BUILD_DIR/.profile.d"
+render "$BUILDPACK_DIR/profile/console_guard.sh" \
+       "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
+chmod 644 "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
+
+# The command wrapper. Installed under all three names; it dispatches on $0. This
+# is where all argument policy lives, because it is the first point at which the
+# shell has finished expanding the operator's command.
+#
+# `bundle` is one of them because Heroku's Ruby buildpack rewrites `rake <task>`
+# on a one-off dyno to `bundle exec rake <task>`, and `bundle exec` then puts
+# Bundler's own bin directory ahead of this one on PATH -- so the rails/rake
+# wrapper is never reached and policy has to be applied by the `bundle` wrapper
+# itself.
+SHIM_DIR="$BUILD_DIR/.console-guard/bin"
+mkdir -p "$SHIM_DIR"
+render "$BUILDPACK_DIR/guard/shim.sh" "$SHIM_DIR/rails"
+cp "$SHIM_DIR/rails" "$SHIM_DIR/rake"
+cp "$SHIM_DIR/rails" "$SHIM_DIR/bundle"
+chmod 755 "$SHIM_DIR/rails" "$SHIM_DIR/rake" "$SHIM_DIR/bundle"
+
+{
+  echo "profile script: .profile.d/zzz_console_guard.sh"
+  echo "command wrapper: .console-guard/bin/{rails,rake,bundle}"
+  echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
+  echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"
+} | indent
+
 echo "       Done."
