@@ -25,14 +25,54 @@ module ConsoleGuard
   class Gate
     include Denials
 
-    # Read by profile/console_guard.sh. The stub can only act on an exit status,
-    # so each distinct thing it has to do to the login shell's environment gets
-    # a code of its own.
-    DENIED = 1
+    # The contract with profile/console_guard.sh. It can only act on an exit
+    # status, so each distinct thing the login shell has to do to its own
+    # environment gets a code of its own.
+    #
+    # Two independent things can apply to a dyno, and the code says which:
+    #
+    #   gated    the guard vets the command before it runs. This is what
+    #            requires CONSOLE_USER and CONSOLE_REASON, applies the command
+    #            and argument policy, and refuses the session.
+    #   audited  CONSOLE_AUDIT_ENABLED is exported, so the console_audit gem
+    #            inside the app records what the session does. It refuses
+    #            nothing: it is the record, not the control.
+    #
+    # Gating implies auditing -- a vetted session is worth a record. Auditing
+    # does not imply gating, and AUDITED below is that case.
+
+    # Not a console at all: a long-running dyno (web, worker, or any other
+    # app-defined process type). Nothing applies.
     NOT_APPLICABLE = 0
+
+    # A one-off dyno whose command nobody typed: Heroku Scheduler and release
+    # phase. Recorded, but not vetted, for two reasons.
+    #
+    # Gating asks "who are you and why", and there is nobody there to answer --
+    # Scheduler and release commands run unattended, so requiring CONSOLE_USER
+    # would refuse every scheduled job on the app rather than protecting
+    # anything.
+    #
+    # And the command is not an operator's to choose. It is whatever the app's
+    # Scheduler entry or Procfile release line says, which is changed by a
+    # deploy or a dashboard edit -- a different access path, with its own
+    # controls, and not one a console gate is in front of.
+    #
+    # What is left worth having is the record: a rake task run by Scheduler can
+    # touch the same data a console can, so the gem still logs it.
     AUDITED = 10
+
+    # An operator's `heroku run`, vetted and permitted.
     GATED = 20
+
+    # As GATED, and the login shell must also supply a placeholder CONSOLE_USER.
+    # Only reachable in permit mode; see require_identity for why it is needed
+    # and why it is a status rather than something this process can do.
     GATED_ANONYMOUS = 21
+
+    # Refused. The banner is printed, the record sent, and the CLI's
+    # exit-status marker emitted, before this is returned.
+    DENIED = 1
 
     # `heroku run --exit-code` appends
     #

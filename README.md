@@ -587,9 +587,15 @@ Populated automatically by Heroku:
 | `web.N`, `worker.N`, any other process type | Not enforced | Not exported |
 | Unknown or missing dyno name | Enforced (fails closed) | Exported |
 
-Scheduler and release dynos are one-off dynos, but there is no interactive operator to supply a user
-and a reason, and their commands come from app configuration rather than from an ad-hoc invocation.
-They are audited but not gated. See [Limitations](#limitations).
+Scheduler and release dynos are one-off dynos, but nothing gates them, for two reasons. Gating asks
+"who are you and why", and nobody is there to answer — these commands run unattended, so requiring
+`CONSOLE_USER` would refuse every scheduled job on the app rather than protect anything. And the
+command is not an operator's to choose: it is whatever the app's Scheduler entry or `Procfile`
+release line says, which is changed by a deploy or a dashboard edit — a different access path, with
+its own controls, and not one a console gate is in front of.
+
+What is left worth having is the record, so `CONSOLE_AUDIT_ENABLED` is still exported: a rake task
+run by Scheduler can touch the same data a console can. See [Limitations](#limitations).
 
 ## Development
 

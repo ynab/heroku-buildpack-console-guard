@@ -60,14 +60,13 @@ module ConsoleGuard
       metadata_seen? && !@id.empty?
     end
 
-    # One-off dyno families:
-    #   run.N        `heroku run` / `heroku run:detached` -- fully gated
-    #   scheduler.N  Heroku Scheduler -- audited but not gated: there is no
-    #                interactive operator to supply a user or a reason, and the
-    #                command comes from app configuration
-    #   release.N    release phase -- same
-    # Long-running dynos (web.N, worker.N, and any other app-defined process
-    # type) get neither: the audit hook is a console concern.
+    # Which dyno families the guard applies to. See ConsoleGuard::Gate for what
+    # gated and audited each mean, and why the two are not the same question.
+    #
+    #   run.N        `heroku run` / `heroku run:detached` -- gated and audited
+    #   scheduler.N  Heroku Scheduler        -- audited only
+    #   release.N    release phase           -- audited only
+    #   anything else                        -- neither
     def gated?
       # No dyno name from either source. Assume a one-off dyno and gate it,
       # rather than letting a command through ungated.

@@ -9,13 +9,36 @@
 # of things only the login shell itself can do, because it is the process that
 # will run the operator's command and a child cannot reach into its parent:
 #
-#   - read /proc/$$/cmdline, which is where the dyno command is
+#   - name /proc/$$/cmdline. The gate does the reading, but `$$` has to be
+#     expanded here: this shell's argv is `bash -c <the dyno command>`, and a
+#     child looking up its own PID would find the gate's argv instead
 #   - exit, which is how a denial refuses the session
 #   - prepend the command wrapper to PATH, so `rails` and `rake` reach it
-#   - unset EDITOR/VISUAL and export CONSOLE_AUDIT_ENABLED
+#   - unset EDITOR/VISUAL, and export CONSOLE_AUDIT_ENABLED and CONSOLE_USER
 #
-# The gate reports back through its exit status. Adding a rule means editing the
-# Ruby, not this file.
+# Adding a rule means editing the Ruby, not this file.
+#
+# WHAT THE GATE'S EXIT STATUS MEANS
+#
+# Two independent things can apply to a dyno, and the status says which:
+#
+#   gated    the guard vets the command before it runs -- the caller must
+#            identify themselves, and the command and its arguments must pass
+#            policy. This is what refuses a session.
+#   audited  CONSOLE_AUDIT_ENABLED is exported, so the console_audit gem inside
+#            the app records what the session does. This refuses nothing; it is
+#            the record, not the control.
+#
+# Gated implies audited. The reverse does not hold, and status 10 is that case.
+#
+#    0  neither. A long-running dyno (web, worker, ...), which is not a console.
+#   10  audited, not gated. See ConsoleGuard::Gate for why the distinction
+#       exists and which dynos land here.
+#   20  gated and audited. An operator's `heroku run`, and it passed.
+#   21  as 20, and permit mode needs CONSOLE_USER supplied. Only the login shell
+#       can export it, which is why it has a status of its own.
+#    1  denied. The gate has already told the operator and recorded it.
+#   99  the guard could not run at all.
 
 # Substituted by bin/compile at build time. Absolute, and never a PATH lookup:
 # PATH is `heroku run -e`-settable, so looking the interpreter up here would let
@@ -27,9 +50,6 @@ if [[ -x "$_cg_ruby" ]]; then
   # `--disable=gems,rubyopt` closes RUBYOPT and RubyGems, both of which an
   # operator can point at their own code. RUBYLIB is closed inside the gate,
   # before it requires anything.
-  #
-  # $$ is this login shell, whose argv is `bash -c <the dyno command>`. A child
-  # process reading its own /proc entry would see the gate's argv instead.
   CONSOLE_GUARD_CMDLINE="/proc/$$/cmdline" \
     "$_cg_ruby" --disable=gems,rubyopt "$_cg_root/libexec/run_gate.rb"
   _cg_status=$?
@@ -39,12 +59,11 @@ fi
 
 case "$_cg_status" in
   0)
-    # A long-running dyno. The audit hook is a console concern.
+    # Neither gated nor audited.
     ;;
   10)
-    # Scheduler and release dynos: audited, but not gated. There is no
-    # interactive operator to supply a user or a reason, and the command comes
-    # from app configuration.
+    # Audited, not gated: record what the session does, but vet nothing and
+    # refuse nothing.
     export CONSOLE_AUDIT_ENABLED=true
     ;;
   20 | 21)
