@@ -114,10 +114,17 @@ runs. All three are closed, and the tests pin each one.
 | RubyGems, `GEM_HOME`, `GEM_PATH` | `--disable=gems`. The guard uses stdlib only, so nothing is lost |
 | `RUBYLIB` — what answers a stdlib `require` | Its entries are removed from `$LOAD_PATH` before the first `require`. The guard's own files are reached with `require_relative`, which never consults `$LOAD_PATH` |
 
-The interpreter is resolved by `bin/compile`, which prefers one inside the slug (so the guard runs on
-the same Ruby the app does) and falls back to the stack image's. **The build fails if it cannot find
-one** — a green build with no guard installed is the worst outcome available. Override with the
-`CONSOLE_GUARD_RUBY` config var if the app's Ruby is somewhere unusual.
+`bin/compile` resolves the interpreter once and bakes the path into both shell files. `heroku/ruby`
+exports its `PATH` for the buildpacks that run after it, so the app's own Ruby is what gets found —
+and because the slug is built in `BUILD_DIR` and extracted at `/app`, a vendored interpreter is
+re-rooted to the path the *dyno* will see. **The build fails if there is no Ruby at all**, which
+means this buildpack was ordered before `heroku/ruby`; a green build with no guard installed is the
+worst outcome available.
+
+Nothing re-resolves it at run time and no environment variable can override it. If the baked path is
+gone — the app's buildpacks were reordered, or its Ruby removed, since the last build — the profile
+script refuses every dyno that might be a one-off and warns on the rest, rather than taking a web
+dyno down over a console control.
 
 ## Command policy
 
@@ -434,7 +441,7 @@ records the installed version:
 -----> Installing console guard 7f1e0d8
        profile script: .profile.d/zzz_console_guard.sh
        command wrapper: .console-guard/bin/{rails,rake,bundle}
-       policy: .console-guard/lib/console_guard/ (10 ruby files)
+       policy: .console-guard/{lib,libexec}/ (10 ruby files)
        ruby: /app/.heroku/ruby/bin/ruby
        dyno metadata file: /etc/heroku/dyno
        enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time
@@ -554,14 +561,12 @@ Set as a config var on the app, and read at **build** time:
 |---|---|---|
 | `CONSOLE_GUARD_DYNO_METADATA_FILE` | No | Where to read the dyno name and UUID. Defaults to `/etc/heroku/dyno`. An unreadable path degrades to the `$DYNO` fallback |
 | `CONSOLE_GUARD_VERSION` | No | Overrides the version string in build logs and denial messages. Defaults to the buildpack's short commit SHA |
-| `CONSOLE_GUARD_RUBY` | No | Absolute path to the interpreter the guard runs on, as the *dyno* will see it. Defaults to a Ruby in the slug, then to the stack image's. The build fails if none is found |
 
 Set by the buildpack itself:
 
 | Variable | Value | Notes |
 |---|---|---|
 | `CONSOLE_AUDIT_ENABLED` | `true` | Exported on `run`, `scheduler` and `release` dynos, in both enforcement modes. Activates the audit hook in the companion gem. Because `.profile.d` scripts run *after* config vars and `-e` vars are applied, an operator cannot disable it via `-e`. In local and development environments, where this buildpack does not run, set it manually to opt in |
-| `CONSOLE_GUARD_RUBY` | absolute path | Exported on gated dynos, so the command wrapper runs on the same interpreter the gate did. Set after `-e` is applied, so an operator-supplied value is overwritten rather than trusted |
 | `PATH` | prepended | With `.console-guard/bin`, so `rails`, `rake` and `bundle` resolve to the command wrapper |
 | `EDITOR`, `VISUAL` | unset | They are a shell escape via `rails credentials:edit` |
 

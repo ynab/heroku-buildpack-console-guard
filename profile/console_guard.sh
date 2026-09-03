@@ -17,33 +17,13 @@
 # The gate reports back through its exit status. Adding a rule means editing the
 # Ruby, not this file.
 
-# Substituted by bin/compile at build time.
+# Substituted by bin/compile at build time. Absolute, and never a PATH lookup:
+# PATH is `heroku run -e`-settable, so looking the interpreter up here would let
+# an operator hand the gate its own Ruby.
 _cg_ruby="@@CG_RUBY@@"
 _cg_root="${HOME:-/app}/.console-guard"
 
-# Absolute, never a PATH lookup: PATH is `heroku run -e`-settable, so looking the
-# interpreter up would let an operator hand the gate its own Ruby. The fallbacks
-# are absolute for the same reason, and exist only for a slug whose Ruby moved
-# after the build resolved it.
-if [[ ! -x "$_cg_ruby" ]]; then
-  for _cg_candidate in "${HOME:-/app}"/.heroku/ruby/bin/ruby \
-                       "${HOME:-/app}"/vendor/ruby-*/bin/ruby \
-                       /usr/local/bin/ruby /usr/bin/ruby; do
-    if [[ -x "$_cg_candidate" ]]; then
-      _cg_ruby="$_cg_candidate"
-      break
-    fi
-  done
-  unset _cg_candidate
-fi
-
 if [[ -x "$_cg_ruby" ]]; then
-  # Exported so the command wrapper runs on the same interpreter this did,
-  # including when the build-time path was wrong and a fallback above found
-  # another. .profile.d is sourced after `heroku run -e` is applied, so an
-  # operator-supplied value is overwritten here rather than trusted.
-  export CONSOLE_GUARD_RUBY="$_cg_ruby"
-
   # `--disable=gems,rubyopt` closes RUBYOPT and RubyGems, both of which an
   # operator can point at their own code. RUBYLIB is closed inside the gate,
   # before it requires anything.
@@ -92,10 +72,15 @@ case "$_cg_status" in
     fi
     ;;
   99)
-    # Only reachable from a broken build: the interpreter is resolved at build
-    # time and the build fails without one. Refuse anything that might be a
-    # one-off dyno; leave long-running dynos running rather than taking the app
-    # down over an audit control that does not apply to them.
+    # The interpreter bin/compile resolved is not there any more -- the app's
+    # buildpacks were reordered, or its Ruby was removed, since the last build.
+    # Not something an operator can arrange: the path above is absolute and does
+    # not depend on anything `-e` can set.
+    #
+    # $DYNO is spoofable, and is used anyway, because the thing that would read
+    # the un-spoofable metadata file is the gate this branch cannot run. Refuse
+    # anything that might be a one-off dyno; leave long-running dynos running
+    # rather than taking the whole app down over a console control.
     case "${DYNO:-}" in
       run.* | scheduler.* | release.* | "")
         {
@@ -124,6 +109,5 @@ case "$_cg_status" in
 esac
 
 # This script is sourced, so clean up after ourselves rather than leaking state
-# into the console session. CONSOLE_GUARD_RUBY is exported on purpose: the
-# command wrapper reads it.
+# into the console session.
 unset _cg_ruby _cg_root _cg_status

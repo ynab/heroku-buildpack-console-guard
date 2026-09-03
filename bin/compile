@@ -43,60 +43,32 @@ fi
 [[ -n "$CG_VERSION" ]] || CG_VERSION="unknown"
 
 # ---------- resolve the Ruby interpreter ----------
-# The guard's policy is Ruby, and it must be reached by absolute path: PATH is
-# `heroku run -e`-settable, so a lookup inside the dyno would let an operator
-# hand the gate its own interpreter.
+# The guard's policy is Ruby, and the dyno must reach it by absolute path: PATH
+# is `heroku run -e`-settable, so a lookup there would let an operator hand the
+# gate its own interpreter. Resolving it is therefore this script's job, and the
+# resolved path is baked into both shell entry points.
 #
-# CG_RUBY_BUILD is the interpreter as it can be run here, on the build dyno.
-# CG_RUBY is the same interpreter as the running dyno will see it -- the slug is
-# built in BUILD_DIR and extracted at /app, so a vendored Ruby changes path
-# between the two and one from the stack image does not.
-CG_RUBY=""
-CG_RUBY_BUILD=""
+# heroku/ruby exports its PATH for the buildpacks that run after it, so the
+# app's own interpreter is on PATH here. If it is not, this buildpack was
+# ordered before heroku/ruby, or the app has no Ruby at all -- either way there
+# is nothing to install a guard onto.
+CG_RUBY_BUILD="$(command -v ruby 2>/dev/null || true)"
 
-resolve_ruby() {
-  local override candidate
-  override="$(env_var CONSOLE_GUARD_RUBY "")"
-  if [[ -n "$override" ]]; then
-    CG_RUBY="$override"
-    CG_RUBY_BUILD="$override"
-    return 0
-  fi
-
-  # Preferred: a Ruby inside the slug, so the guard runs on the same interpreter
-  # the app does and cannot be broken by a stack image change.
-  for candidate in "$BUILD_DIR"/.heroku/ruby/bin/ruby \
-                   "$BUILD_DIR"/vendor/ruby-*/bin/ruby \
-                   "$BUILD_DIR"/vendor/ruby/bin/ruby \
-                   "$BUILD_DIR"/bin/ruby; do
-    if [[ -x "$candidate" ]]; then
-      CG_RUBY_BUILD="$candidate"
-      CG_RUBY="/app${candidate#"$BUILD_DIR"}"
-      return 0
-    fi
-  done
-
-  # Otherwise a Ruby from the stack image, which is at the same absolute path at
-  # run time as it is here.
-  candidate="$(command -v ruby 2>/dev/null || true)"
-  if [[ -n "$candidate" && -x "$candidate" ]]; then
-    CG_RUBY_BUILD="$candidate"
-    CG_RUBY="$candidate"
-    return 0
-  fi
-
-  return 1
-}
-
-if ! resolve_ruby; then
+if [[ -z "$CG_RUBY_BUILD" ]]; then
   {
     echo "console-guard: no Ruby interpreter found, so the guard cannot be installed."
-    echo "               Add this buildpack after heroku/ruby, or set the"
-    echo "               CONSOLE_GUARD_RUBY config var to an absolute path that"
-    echo "               will exist inside the dyno."
+    echo "               Add this buildpack after heroku/ruby."
   } >&2
   exit 1
 fi
+
+# The slug is built in BUILD_DIR and extracted at /app, so an interpreter
+# vendored into the slug is at a different path in the dyno than it is here. One
+# from the stack image is at the same path in both.
+case "$CG_RUBY_BUILD" in
+  "$BUILD_DIR"/*) CG_RUBY="/app${CG_RUBY_BUILD#"$BUILD_DIR"}" ;;
+  *)              CG_RUBY="$CG_RUBY_BUILD" ;;
+esac
 
 # ---------- install ----------
 
@@ -130,21 +102,27 @@ echo "-----> Installing console guard ${CG_VERSION}"
 
 GUARD_DIR="$BUILD_DIR/.console-guard"
 
-# The policy, and the two entry points that run it. Discovered rather than
-# listed, so splitting a class into another file cannot silently drop it from
-# the slug and leave a dyno with half a guard.
-CG_RUBY_FILES=0
-while IFS= read -r src; do
-  render "$src" "$GUARD_DIR/${src#"$BUILDPACK_DIR"/guard/}"
-  chmod 644 "$GUARD_DIR/${src#"$BUILDPACK_DIR"/guard/}"
-  CG_RUBY_FILES=$((CG_RUBY_FILES + 1))
-done < <(find "$BUILDPACK_DIR/guard/lib" "$BUILDPACK_DIR/guard/libexec" \
-              -type f -name '*.rb' | sort)
+# The policy, and the two entry points that run it. `render` refuses a source
+# file that is not there, so a rename fails the build here rather than reaching
+# a dyno; a file added and not listed fails the guard's own requires, which the
+# test suite runs.
+CG_POLICY_FILES=(
+  lib/console_guard.rb
+  lib/console_guard/banner.rb
+  lib/console_guard/command.rb
+  lib/console_guard/config.rb
+  lib/console_guard/denials.rb
+  lib/console_guard/dyno.rb
+  lib/console_guard/gate.rb
+  lib/console_guard/reporter.rb
+  libexec/run_gate.rb
+  libexec/run_command.rb
+)
 
-if (( CG_RUBY_FILES == 0 )); then
-  echo "console-guard: no policy files found to install" >&2
-  exit 1
-fi
+for rel in "${CG_POLICY_FILES[@]}"; do
+  render "$BUILDPACK_DIR/guard/$rel" "$GUARD_DIR/$rel"
+  chmod 644 "$GUARD_DIR/$rel"
+done
 
 # Named zzz_ so it loads last, after every other buildpack's profile script.
 # CONSOLE_AUDIT_ENABLED must be the final exported value, and the PATH entry that
@@ -168,7 +146,7 @@ chmod 755 "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/rake" "$GUARD_DIR/bin/bundle"
 {
   echo "profile script: .profile.d/zzz_console_guard.sh"
   echo "command wrapper: .console-guard/bin/{rails,rake,bundle}"
-  echo "policy: .console-guard/lib/console_guard/ (${CG_RUBY_FILES} ruby files)"
+  echo "policy: .console-guard/{lib,libexec}/ (${#CG_POLICY_FILES[@]} ruby files)"
   echo "ruby: ${CG_RUBY}"
   echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
   echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"

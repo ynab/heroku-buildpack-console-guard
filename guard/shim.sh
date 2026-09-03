@@ -13,11 +13,11 @@
 
 set -uo pipefail
 
-# Exported by the profile script, which is sourced after `heroku run -e` is
-# applied and so overwrites anything an operator supplied. @@CG_RUBY@@ is the
-# build-time resolution, and the fallback for a dyno the profile script left
-# ungated -- where this wrapper is not on PATH anyway.
-_cg_ruby="${CONSOLE_GUARD_RUBY:-@@CG_RUBY@@}"
+# Substituted by bin/compile, as it is in the profile script, so both halves run
+# on the interpreter the build resolved. Not read from the environment: this
+# wrapper vets an operator's command, and letting them name its interpreter
+# would be handing them the thing doing the vetting.
+_cg_ruby="@@CG_RUBY@@"
 _cg_root="${HOME:-/app}/.console-guard"
 
 if [[ ! -x "$_cg_ruby" ]]; then

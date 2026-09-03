@@ -253,4 +253,25 @@ unset _cg_bad_ruby _cg_rb
 assert_false 'fails when no ruby can be resolved' \
   env -i PATH=/nonexistent "$CG_ROOT/bin/compile" "$CG_TMP_ROOT/no-ruby"
 
+# The slug is built in BUILD_DIR and extracted at /app, so an interpreter
+# vendored into it is at a different path in the dyno. Baking the build-time
+# path would leave every dyno unable to start the guard -- and the guard treats
+# a missing interpreter as a refusal, so it would take out `heroku run` on the
+# next deploy rather than failing here.
+_cg_vendor="$CG_TMP_ROOT/vendored"
+_cg_vendor_bin="$_cg_vendor/app/.heroku/ruby-9.9.9/bin"
+mkdir -p "$_cg_vendor_bin" "$_cg_vendor/env"
+printf '#!/bin/sh\nexec %s "$@"\n' "$(command -v ruby)" > "$_cg_vendor_bin/ruby"
+chmod 755 "$_cg_vendor_bin/ruby"
+PATH="$_cg_vendor_bin:$PATH" "$CG_ROOT/bin/compile" \
+  "$_cg_vendor/app" "$_cg_vendor/cache" "$_cg_vendor/env" > "$_cg_vendor/build.log" 2>&1
+CG_OUT="$(cat "$_cg_vendor/build.log")"
+assert_true 'a slug-vendored ruby is baked as the path the dyno will see' \
+  grep -q '^_cg_ruby="/app/.heroku/ruby-9.9.9/bin/ruby"$' \
+  "$_cg_vendor/app/.profile.d/zzz_console_guard.sh"
+assert_true 'and the command wrapper gets the same one' \
+  grep -q '^_cg_ruby="/app/.heroku/ruby-9.9.9/bin/ruby"$' \
+  "$_cg_vendor/app/.console-guard/bin/rails"
+unset _cg_vendor _cg_vendor_bin
+
 cg_finish
