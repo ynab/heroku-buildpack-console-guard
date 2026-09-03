@@ -144,6 +144,21 @@ assert_ran 'rails c'
 # deployed guard.
 assert_output 'denials name the guard version' 'psql' 'console-guard '
 
+# An interpreter that is not there any more -- the app's buildpacks reordered,
+# or its Ruby removed, since the last build. This is the one branch that has to
+# tell one-off dynos from long-running ones without the gate, because the gate
+# is what it cannot start.
+cp "$CG_APP/.profile.d/zzz_console_guard.sh" "$CG_TMP_ROOT/profile.bak"
+sed -i 's|^_cg_ruby=.*|_cg_ruby="/nonexistent/ruby"|' \
+  "$CG_APP/.profile.d/zzz_console_guard.sh"
+assert_blocked 'rails c' 'cannot be vetted'
+# ...and does not take the app down with it: a web dyno still boots.
+cg_env 'DYNO=web.1'
+assert_output 'a long-running dyno still starts without an interpreter' \
+  'echo alive' 'alive'
+cp "$CG_TMP_ROOT/profile.bak" "$CG_APP/.profile.d/zzz_console_guard.sh"
+assert_ran 'rails c'
+
 cg_section "the operator cannot choose the guard's interpreter"
 # The policy is Ruby, so three `heroku run -e` variables are code injection into
 # the thing vetting the command: PATH (which interpreter), RUBYOPT (what it

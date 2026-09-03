@@ -36,24 +36,56 @@
 #   10  audited, not gated. See ConsoleGuard::Gate for why the distinction
 #       exists and which dynos land here.
 #   20  gated and audited. An operator's `heroku run`, and it passed.
-#   21  as 20, and dry-run mode needs CONSOLE_USER supplied. This shell script will
-#       set a placeholder value.
-#   99  the guard could not run at all.
+#   21  as 20, and dry-run mode needs CONSOLE_USER supplied. This shell script
+#       will set a placeholder value.
+#
+# Any other status is a gate that died rather than decided, and is treated as a
+# denial. The case where the gate cannot be started at all is handled before it
+# is reached, and does not borrow this channel.
 
 # CG_RUBY is defined by bin/compile at build time, and is a fixed absolute path.
 _cg_ruby="@@CG_RUBY@@"
 _cg_root="${HOME:-/app}/.console-guard"
 
-if [[ -x "$_cg_ruby" ]]; then
-  # `--disable=gems,rubyopt` closes RUBYOPT and RubyGems, both of which an
-  # operator can point at their own code. RUBYLIB is closed inside the gate,
-  # before it requires anything.
-  CONSOLE_GUARD_CMDLINE="/proc/$$/cmdline" \
-    "$_cg_ruby" --disable=gems,rubyopt "$_cg_root/libexec/run_gate.rb"
-  _cg_status=$?
-else
-  _cg_status=99
+if [[ ! -x "$_cg_ruby" ]]; then
+  # The interpreter bin/compile resolved is not there any more -- the app's
+  # buildpacks were reordered, or its Ruby removed, since the last build. Not
+  # something an operator can arrange: the path above is absolute and does not
+  # depend on anything `-e` can set.
+  #
+  # $DYNO is spoofable, and is used anyway, because the thing that would read
+  # the un-spoofable metadata file is the gate this branch cannot run. Refuse
+  # anything that might be a one-off dyno; leave long-running dynos running
+  # rather than taking the whole app down over a console control.
+  case "${DYNO:-}" in
+    run.* | scheduler.* | release.* | "")
+      {
+        echo ""
+        echo "=========================================="
+        echo "  No Ruby interpreter for the console guard, so this session"
+        echo "  cannot be vetted. Refusing to run."
+        echo "  console-guard @@CG_VERSION@@"
+        echo "=========================================="
+        echo ""
+      } >&2
+      unset _cg_ruby _cg_root
+      exit 1
+      ;;
+    *)
+      echo "console-guard: no Ruby interpreter found; the audit hook is not active" >&2
+      ;;
+  esac
+
+  unset _cg_ruby _cg_root
+  return 0
 fi
+
+# `--disable=gems,rubyopt` closes RUBYOPT and RubyGems, both of which an
+# operator can point at their own code. RUBYLIB is closed inside the gate,
+# before it requires anything.
+CONSOLE_GUARD_CMDLINE="/proc/$$/cmdline" \
+  "$_cg_ruby" --disable=gems,rubyopt "$_cg_root/libexec/run_gate.rb"
+_cg_status=$?
 
 case "$_cg_status" in
   0)
@@ -82,40 +114,11 @@ case "$_cg_status" in
 
     if [[ "$_cg_status" == 21 ]]; then
       # Dry-run mode with no CONSOLE_USER. console1984 raises MissingUsername on
-      # an empty one, so the console would die anyway and dry-run mode would fail
-      # to permit. Deliberately not a plausible username: it has to be obvious in
-      # an audit record that nobody identified themselves.
+      # an empty one, so the console would die anyway and dry-run mode would stop
+      # being a dry run. Deliberately not a plausible username: it has to be
+      # obvious in an audit record that nobody identified themselves.
       export CONSOLE_USER="[not provided]"
     fi
-    ;;
-  99)
-    # The interpreter bin/compile resolved is not there any more -- the app's
-    # buildpacks were reordered, or its Ruby was removed, since the last build.
-    # Not something an operator can arrange: the path above is absolute and does
-    # not depend on anything `-e` can set.
-    #
-    # $DYNO is spoofable, and is used anyway, because the thing that would read
-    # the un-spoofable metadata file is the gate this branch cannot run. Refuse
-    # anything that might be a one-off dyno; leave long-running dynos running
-    # rather than taking the whole app down over a console control.
-    case "${DYNO:-}" in
-      run.* | scheduler.* | release.* | "")
-        {
-          echo ""
-          echo "=========================================="
-          echo "  No Ruby interpreter for the console guard, so this session"
-          echo "  cannot be vetted. Refusing to run."
-          echo "  console-guard @@CG_VERSION@@"
-          echo "=========================================="
-          echo ""
-        } >&2
-        unset _cg_ruby _cg_root _cg_status
-        exit 1
-        ;;
-      *)
-        echo "console-guard: no Ruby interpreter found; the audit hook is not active" >&2
-        ;;
-    esac
     ;;
   *)
     # A denial. The gate has already printed the banner, recorded the denial and
