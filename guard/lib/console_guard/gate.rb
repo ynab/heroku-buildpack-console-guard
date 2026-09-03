@@ -45,28 +45,31 @@ module ConsoleGuard
     # app-defined process type). Nothing applies.
     NOT_APPLICABLE = 0
 
-    # A one-off dyno whose command nobody typed: Heroku Scheduler and release
-    # phase. Recorded, but not vetted, for two reasons.
+    # A one-off dyno whose command the app configured rather than an operator
+    # typed: Heroku Scheduler and release phase.
     #
-    # Gating asks "who are you and why", and there is nobody there to answer --
-    # Scheduler and release commands run unattended, so requiring CONSOLE_USER
-    # would refuse every scheduled job on the app rather than protecting
-    # anything.
-    #
-    # And the command is not an operator's to choose. It is whatever the app's
-    # Scheduler entry or Procfile release line says, which is changed by a
-    # deploy or a dashboard edit -- a different access path, with its own
+    # Not gated, for two reasons. Gating asks "who are you and why", and there
+    # is nobody there to answer -- these run unattended, so requiring
+    # CONSOLE_USER would refuse every scheduled job on the app rather than
+    # protect anything. And the command is not an operator's to choose: it is
+    # whatever the Scheduler entry or Procfile release line says, which changes
+    # by a deploy or a dashboard edit -- a different access path, with its own
     # controls, and not one a console gate is in front of.
     #
-    # What is left worth having is the record: a rake task run by Scheduler can
-    # touch the same data a console can, so the gem still logs it.
+    # Audited anyway, because that access path is the obvious way around this
+    # guard. A Scheduler entry is editable in the Heroku dashboard by anyone
+    # with app access, so `rake some:task` scheduled there reaches the same data
+    # a console does, with no `heroku run` for the gate to see. Setting the flag
+    # is what makes a record of it exist: console1984 only hooks the interactive
+    # console, but the companion gem also hooks Rails boot and logs rake and
+    # `rails runner` as `noninteractive_command`.
     AUDITED = 10
 
     # An operator's `heroku run`, vetted and permitted.
     GATED = 20
 
     # As GATED, and the login shell must also supply a placeholder CONSOLE_USER.
-    # Only reachable in permit mode; see require_identity for why it is needed
+    # Only reachable in dry-run mode; see require_identity for why it is needed
     # and why it is a status rather than something this process can do.
     GATED_ANONYMOUS = 21
 
@@ -259,11 +262,11 @@ module ConsoleGuard
 
       # console1984 raises MissingUsername on an empty CONSOLE_USER
       # (ask_for_username_if_empty defaults to false), so leaving it empty kills
-      # the console even in permit mode -- which is exactly the breakage permit
+      # the console even in dry-run mode -- which is exactly the breakage permit
       # mode exists to avoid during phase 1. The profile script supplies a
       # placeholder instead; see GATED_ANONYMOUS.
       #
-      # Only in permit mode. When enforcing, the denial above has already exited.
+      # Only in dry-run mode. When enforcing, the denial above has already exited.
       @anonymous = true if !enforcing? && ConsoleGuard.blank?(ENV['CONSOLE_USER'])
     end
 

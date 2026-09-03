@@ -244,7 +244,7 @@ class GateTest < GuardTest
     refute_includes gate('rails c').output, 'dyno metadata is not enabled'
   end
 
-  # ---------------------------------------------------------------- permit mode
+  # ---------------------------------------------------------------- dry-run mode
 
   def test_permit_mode_warns_and_permits
     result = gate('bash', env: { 'CONSOLE_BLOCK_ENFORCE' => 'false' })
@@ -254,7 +254,7 @@ class GateTest < GuardTest
 
   def test_permit_mode_asks_for_a_placeholder_operator
     # console1984 raises MissingUsername on an empty CONSOLE_USER, so leaving it
-    # empty kills the console even in permit mode -- exactly the breakage permit
+    # empty kills the console even in dry-run mode -- exactly the breakage permit
     # mode exists to avoid. The distinct status is how the login shell is told.
     result = gate('rails c', env: { 'CONSOLE_USER' => '', 'CONSOLE_BLOCK_ENFORCE' => 'false' })
     assert_equal GATED_ANONYMOUS, result.status

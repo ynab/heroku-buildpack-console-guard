@@ -12,7 +12,7 @@ module ConsoleGuard
   # dyno to `bundle exec rake <task>`.
   WRAPPER_NAMES = %w[rails rake bundle].freeze
 
-  # Only the exact string opts into permit mode, so a typo or an empty value
+  # Only the exact string opts into dry-run mode, so a typo or an empty value
   # fails closed.
   def self.enforcing?
     ENV['CONSOLE_BLOCK_ENFORCE'] != 'false'

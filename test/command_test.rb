@@ -264,7 +264,7 @@ class CommandTest < GuardTest
   # ---------------------------------------------------------------- enforcement
 
   def test_enforcement_defaults_to_blocking
-    # Only the exact string `false` opts into permit mode, so a typo or an empty
+    # Only the exact string `false` opts into dry-run mode, so a typo or an empty
     # value fails closed.
     ['0', '', 'False', 'true'].each do |value|
       assert_denied wrapper('rails', 'dbconsole', env: { 'CONSOLE_BLOCK_ENFORCE' => value })

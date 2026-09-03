@@ -185,18 +185,18 @@ assert_ran 'rails c'
 # The operator claims to be on a web dyno to skip the gate; the file disagrees.
 cg_env 'DYNO=web.1' ; assert_blocked 'rails c' 'does not match this dyno'
 
-# ============================================================ permit mode
-cg_section "phase 1: permit mode hands the app an operator"
+# ============================================================ dry-run mode
+cg_section "phase 1: dry-run mode hands the app an operator"
 cg_build permit CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/permit/dyno-metadata.json"
 cg_env_sticky 'CONSOLE_BLOCK_ENFORCE=false'
 assert_output 'the audit hook is still activated' 'rails c' 'AUDIT=true'
 assert_output 'a would-be denial warns and permits' 'psql' 'WILL BE BLOCKED'
 # An empty CONSOLE_USER is not enough to be non-blocking: console1984 raises
-# MissingUsername on one, so the console dies anyway and permit mode fails to
+# MissingUsername on one, so the console dies anyway and dry-run mode fails to
 # permit. The app gets a placeholder instead -- obviously not a real username, so
 # an audit record cannot be mistaken for an identified session. Only the login
 # shell can export it, which is why it has an exit status of its own.
-cg_env 'CONSOLE_USER=' ; assert_output 'permit mode supplies a placeholder operator' \
+cg_env 'CONSOLE_USER=' ; assert_output 'dry-run mode supplies a placeholder operator' \
   'rails c' 'USER=[not provided]'
 cg_env 'CONSOLE_USER=   ' ; assert_output 'whitespace-only counts as absent here too' \
   'rails c' 'USER=[not provided]'

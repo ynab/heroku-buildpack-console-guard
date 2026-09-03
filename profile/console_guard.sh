@@ -32,17 +32,15 @@
 # Gated implies audited. The reverse does not hold, and status 10 is that case.
 #
 #    0  neither. A long-running dyno (web, worker, ...), which is not a console.
+#    1  denied. The gate has already told the operator and recorded it.
 #   10  audited, not gated. See ConsoleGuard::Gate for why the distinction
 #       exists and which dynos land here.
 #   20  gated and audited. An operator's `heroku run`, and it passed.
-#   21  as 20, and permit mode needs CONSOLE_USER supplied. Only the login shell
-#       can export it, which is why it has a status of its own.
-#    1  denied. The gate has already told the operator and recorded it.
+#   21  as 20, and dry-run mode needs CONSOLE_USER supplied. This shell script will
+#       set a placeholder value.
 #   99  the guard could not run at all.
 
-# Substituted by bin/compile at build time. Absolute, and never a PATH lookup:
-# PATH is `heroku run -e`-settable, so looking the interpreter up here would let
-# an operator hand the gate its own Ruby.
+# CG_RUBY is defined by bin/compile at build time, and is a fixed absolute path.
 _cg_ruby="@@CG_RUBY@@"
 _cg_root="${HOME:-/app}/.console-guard"
 
@@ -78,13 +76,13 @@ case "$_cg_status" in
 
     # Exported after the gate: .profile.d runs after config vars and
     # `heroku run -e` vars are applied, so this overrides any operator-supplied
-    # value. It is exported in permit mode too, so that phase 1 still produces
+    # value. It is exported in dry-run mode too, so that phase 1 still produces
     # console audit records.
     export CONSOLE_AUDIT_ENABLED=true
 
     if [[ "$_cg_status" == 21 ]]; then
-      # Permit mode with no CONSOLE_USER. console1984 raises MissingUsername on
-      # an empty one, so the console would die anyway and permit mode would fail
+      # Dry-run mode with no CONSOLE_USER. console1984 raises MissingUsername on
+      # an empty one, so the console would die anyway and dry-run mode would fail
       # to permit. Deliberately not a plausible username: it has to be obvious in
       # an audit record that nobody identified themselves.
       export CONSOLE_USER="[not provided]"

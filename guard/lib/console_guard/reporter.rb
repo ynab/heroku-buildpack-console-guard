@@ -74,7 +74,7 @@ module ConsoleGuard
     # rule      short stable identifier for the check that refused -- the field to
     #           group a monitor by, because denial *messages* get reworded
     # command   what the guard was judging, as the banner shows it
-    # enforced  Sent in permit mode as well: phase 1 exists to measure what
+    # enforced  Sent in dry-run mode as well: phase 1 exists to measure what
     #           enforcement would block, which is only measurable if the would-be
     #           denials are recorded.
     # dyno_id   the join key against the api:dyno webhook

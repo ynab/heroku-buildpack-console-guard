@@ -12,7 +12,7 @@ module ConsoleGuard
     def deny(rule, *lines)
       Banner.render(lines, enforcing: enforcing?)
 
-      # Before the exit, and in permit mode too: phase 1 exists to measure what
+      # Before the exit, and in dry-run mode too: phase 1 exists to measure what
       # enforcement would block, which is only measurable if the would-be
       # denials are recorded.
       Reporter.report(rule: rule, command: denial_command, enforced: enforcing?,

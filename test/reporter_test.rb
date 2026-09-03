@@ -124,7 +124,7 @@ class ReporterTest < GuardTest
     assert_includes record.keys, 'guard_version'
   end
 
-  # ---------------------------------------------------------------- permit mode
+  # ---------------------------------------------------------------- dry-run mode
 
   def test_permit_mode_records_the_would_be_denial
     # Phase 1 exists to measure what enforcement would block, which is only

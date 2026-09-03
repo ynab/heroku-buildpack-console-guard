@@ -12,7 +12,7 @@ module ConsoleGuard
       lines.each { |line| io.write('  ', line.to_s, "\n") }
       unless enforcing
         io.write("\n")
-        io.write("  CONSOLE_BLOCK_ENFORCE=false -- permitting anyway (phase 1).\n")
+        io.write("  CONSOLE_BLOCK_ENFORCE=false -- dry-run mode, permitting anyway.\n")
         io.write("  This command WILL BE BLOCKED once enforcement is enabled.\n")
       end
       io.write('  console-guard ', VERSION, "\n")
