@@ -38,6 +38,8 @@ module ConsoleGuard
 
       program, args = policy_target
       apply_policy(program, args)
+      # apply_policy will exit if the command is denied, so reaching this point
+      # means the command is allowed.
 
       # The [command, argv0] form, so a path containing shell metacharacters can
       # never be handed to a shell.

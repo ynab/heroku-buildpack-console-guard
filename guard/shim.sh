@@ -20,12 +20,18 @@ set -uo pipefail
 _cg_ruby="@@CG_RUBY@@"
 _cg_root="${HOME:-/app}/.console-guard"
 
+# The name this was invoked as, with any directory stripped: one of `rails`,
+# `rake` or `bundle`, all three of which are this same file. It decides which
+# policy applies, so it is passed to the wrapper explicitly -- $0 becomes the
+# Ruby entry point's own path the moment the interpreter takes over.
+_cg_prog="${0##*/}"
+
 if [[ ! -x "$_cg_ruby" ]]; then
   # Fail closed and loudly: silently doing nothing would look like a broken app
   # rather than a guard problem.
   {
     echo ""
-    echo "console-guard: no Ruby interpreter at \`${_cg_ruby}\`, so \`${0##*/}\`"
+    echo "console-guard: no Ruby interpreter at \`${_cg_ruby}\`, so \`${_cg_prog}\`"
     echo "               cannot be vetted."
     echo "               This is a buildpack bug, not an operator mistake."
     echo ""
@@ -34,4 +40,4 @@ if [[ ! -x "$_cg_ruby" ]]; then
 fi
 
 exec "$_cg_ruby" --disable=gems,rubyopt \
-     "$_cg_root/libexec/run_command.rb" "${0##*/}" "$@"
+     "$_cg_root/libexec/run_command.rb" "$_cg_prog" "$@"
