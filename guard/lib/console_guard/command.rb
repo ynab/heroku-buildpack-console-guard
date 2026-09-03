@@ -55,7 +55,7 @@ module ConsoleGuard
     # profile half's copy is the pre-expansion string, and the two differ in
     # exactly the cases this class exists for.
     def denial_command
-      "#{@program} #{@argv.join(' ')}"
+      "#{@program} #{@argv.join(" ")}"
     end
 
     def dyno_id
@@ -72,8 +72,8 @@ module ConsoleGuard
     def resolve_real
       self_dir = realpath(ConsoleGuard.wrapper_dir)
 
-      ENV['PATH'].to_s.split(File::PATH_SEPARATOR).each do |entry|
-        entry = '.' if entry.empty?
+      ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |entry|
+        entry = "." if entry.empty?
         dir = realpath(entry)
         next if dir.nil? || dir == self_dir
 
@@ -93,10 +93,10 @@ module ConsoleGuard
     # Fail closed and loudly: silently doing nothing would look like a broken app
     # rather than a guard problem.
     def refuse_without_real_binary
-      $stderr.puts <<~MESSAGE
+      warn <<~MESSAGE
 
         console-guard: could not find the real `#{@program}` on PATH.
-                       PATH=#{ENV['PATH']}
+                       PATH=#{ENV["PATH"]}
                        This is a buildpack bug, not an operator mistake.
 
       MESSAGE
@@ -113,29 +113,29 @@ module ConsoleGuard
     # PATH, so the rails/rake wrapper is NOT reached afterwards and this is the
     # only place the argument rules below can be applied.
     def policy_target
-      return [@program, @argv] unless @program == 'bundle'
+      return [@program, @argv] unless @program == "bundle"
 
-      unless @argv[0] == 'exec'
-        deny 'bundle_not_exec',
-             "`bundle #{@argv[0]}` is not permitted on one-off dynos.",
-             '',
-             'Only `bundle exec rails` and `bundle exec rake` are allowed,',
-             "because those are the forms Heroku's Ruby buildpack produces for",
-             'a permitted command.'
+      unless @argv[0] == "exec"
+        deny "bundle_not_exec",
+          "`bundle #{@argv[0]}` is not permitted on one-off dynos.",
+          "",
+          "Only `bundle exec rails` and `bundle exec rake` are allowed,",
+          "because those are the forms Heroku's Ruby buildpack produces for",
+          "a permitted command."
       end
 
       program = @program
       # Unqualified, for the same reason the profile half requires it of the
       # command itself: a path names a program this wrapper has not vetted.
       case @argv[1]
-      when 'rails', 'rake'
+      when "rails", "rake"
         program = @argv[1]
       else
-        deny 'bundle_exec_not_allowed',
-             "`bundle exec #{@argv[1]}` is not permitted on one-off dynos.",
-             '',
-             'Only `rails` and `rake` may be run under `bundle exec`,',
-             'and the name must be unqualified.'
+        deny "bundle_exec_not_allowed",
+          "`bundle exec #{@argv[1]}` is not permitted on one-off dynos.",
+          "",
+          "Only `rails` and `rake` may be run under `bundle exec`,",
+          "and the name must be unqualified."
       end
 
       [program, @argv.drop(2)]
@@ -155,25 +155,25 @@ module ConsoleGuard
     # `rails dbconsole` / `rails db` drop to a raw psql session; no statement is
     # ever seen by the console audit hook.
     def refuse_raw_database_session(program, subcommand)
-      return unless %w[dbconsole db].include?(subcommand)
+      return unless ["dbconsole", "db"].include?(subcommand)
 
-      deny 'raw_database_session',
-           "`#{program} #{subcommand}` is not permitted on one-off dynos.",
-           '',
-           'It opens a raw database session, so no statement reaches the',
-           'console audit hook.'
+      deny "raw_database_session",
+        "`#{program} #{subcommand}` is not permitted on one-off dynos.",
+        "",
+        "It opens a raw database session, so no statement reaches the",
+        "console audit hook."
     end
 
     # `rails credentials:edit` and `rails encrypted:edit` spawn $EDITOR, which is
     # operator-controlled (`heroku run -e EDITOR=bash`) and therefore a shell.
     # The profile script also unsets EDITOR and VISUAL; this is the second layer.
     def refuse_editor_escape(program, subcommand)
-      return unless subcommand.start_with?('credentials:', 'encrypted:')
+      return unless subcommand.start_with?("credentials:", "encrypted:")
 
-      deny 'editor_escape',
-           "`#{program} #{subcommand}` is not permitted on one-off dynos.",
-           '',
-           'These commands spawn an editor, which is a shell escape.'
+      deny "editor_escape",
+        "`#{program} #{subcommand}` is not permitted on one-off dynos.",
+        "",
+        "These commands spawn an editor, which is a shell escape."
     end
 
     def refuse_unloggable_arguments(args)
@@ -181,23 +181,23 @@ module ConsoleGuard
         # A bare `-` makes `rails runner` read the program from stdin, so the
         # code that runs appears in no log at all -- not the dyno command string,
         # not the api:dyno webhook, not an in-app ARGV capture.
-        if arg == '-'
-          deny 'stdin_program',
-               'Reading the program from stdin is not permitted.',
-               '',
-               'A bare `-` argument means the executed code never appears in',
-               'any audit record. Pass the code inline instead.'
+        if arg == "-"
+          deny "stdin_program",
+            "Reading the program from stdin is not permitted.",
+            "",
+            "A bare `-` argument means the executed code never appears in",
+            "any audit record. Pass the code inline instead."
         end
 
         # `-c` would reach a shell (`bash -c`, `sh -c`). No legitimate rails/rake
         # invocation uses it. `rails c` -- the console shorthand -- is
         # unaffected, because that argument is `c`, not `-c`.
-        next unless arg == '-c'
+        next unless arg == "-c"
 
-        deny 'dash_c_flag',
-             'The `-c` flag is not permitted on one-off dynos.',
-             '',
-             'Use `rails c` for a console.'
+        deny "dash_c_flag",
+          "The `-c` flag is not permitted on one-off dynos.",
+          "",
+          "Use `rails c` for a console."
       end
     end
 
@@ -221,21 +221,21 @@ module ConsoleGuard
     # auditing is active, which is a second layer over the same dynos: it holds
     # even if the command never reaches this wrapper.
     def refuse_sandboxed_console(program, subcommand, args)
-      return unless program == 'rails' && %w[console c].include?(subcommand)
+      return unless program == "rails" && ["console", "c"].include?(subcommand)
 
       args.drop(1).each do |arg|
-        next unless arg == '--sandbox' || arg == '-s' ||
-                    arg.start_with?('--sandbox=', '-s=')
+        next unless arg == "--sandbox" || arg == "-s" ||
+          arg.start_with?("--sandbox=", "-s=")
 
-        deny 'sandbox_console',
-             "`rails #{subcommand} #{arg}` is not permitted on one-off dynos.",
-             '',
-             'A sandboxed console rolls back its transaction on exit, which',
-             'discards the queued audit records with it -- the session would',
-             'run entirely unlogged.',
-             '',
-             "Use `rails #{subcommand}` instead. It is audited.",
-             '`--no-sandbox` is permitted and means the same thing.'
+        deny "sandbox_console",
+          "`rails #{subcommand} #{arg}` is not permitted on one-off dynos.",
+          "",
+          "A sandboxed console rolls back its transaction on exit, which",
+          "discards the queued audit records with it -- the session would",
+          "run entirely unlogged.",
+          "",
+          "Use `rails #{subcommand}` instead. It is audited.",
+          "`--no-sandbox` is permitted and means the same thing."
       end
     end
 
@@ -247,27 +247,27 @@ module ConsoleGuard
     # are past expansion here, so we can apply that same test rather than
     # guessing from how the argument looks.
     def refuse_runner_file(program, subcommand, args)
-      return unless program == 'rails' && %w[runner r].include?(subcommand)
+      return unless program == "rails" && ["runner", "r"].include?(subcommand)
 
       args.drop(1).each do |arg|
-        if arg == '--file' || arg.start_with?('--file=')
-          deny 'runner_file',
-               '`rails runner` may not read its program from a file.',
-               '',
-               'Pass the code inline instead.'
+        if arg == "--file" || arg.start_with?("--file=")
+          deny "runner_file",
+            "`rails runner` may not read its program from a file.",
+            "",
+            "Pass the code inline instead."
         end
 
         next unless file?(arg)
 
-        deny 'runner_file',
-             '`rails runner` may not read its program from a file.',
-             '',
-             "`#{arg}` exists on disk, so Rails would execute the",
-             'file rather than the argument. The command string would then',
-             'name a path rather than the code that runs, and the executed',
-             'code would never be audited.',
-             '',
-             'Pass the code inline instead.'
+        deny "runner_file",
+          "`rails runner` may not read its program from a file.",
+          "",
+          "`#{arg}` exists on disk, so Rails would execute the",
+          "file rather than the argument. The command string would then",
+          "name a path rather than the code that runs, and the executed",
+          "code would never be audited.",
+          "",
+          "Pass the code inline instead."
       end
     end
 
@@ -307,26 +307,26 @@ module ConsoleGuard
     # value  options taking one: exactly, or with the value attached
     #        (`-T db`, `-Tdb`, `--tasks=db`)
     RAILS_PARSED_WHY = [
-      'Options are allowlisted here, so one nobody vetted is refused',
-      'rather than passed through to Rails.'
+      "Options are allowlisted here, so one nobody vetted is refused",
+      "rather than passed through to Rails."
     ].freeze
 
     CONSOLE_OPTIONS = {
-      exact: %w[--no-sandbox -h --help],
-      value: %w[-e --environment],
+      exact: ["--no-sandbox", "-h", "--help"],
+      value: ["-e", "--environment"],
       why: RAILS_PARSED_WHY,
-      extras: ''
+      extras: ""
     }.freeze
 
     RUNNER_OPTIONS = {
-      exact: %w[-w --skip-executor -h --help],
-      value: %w[-e --environment],
+      exact: ["-w", "--skip-executor", "-h", "--help"],
+      value: ["-e", "--environment"],
       why: [
-        'Options are allowlisted here, so one nobody vetted is refused',
-        'rather than passed through to Rails. The code to run is not an',
-        'option and needs no entry.'
+        "Options are allowlisted here, so one nobody vetted is refused",
+        "rather than passed through to Rails. The code to run is not an",
+        "option and needs no entry."
       ].freeze,
-      extras: ''
+      extras: ""
     }.freeze
 
     # Rake's read-only and output-shaping options. Absent, deliberately:
@@ -334,29 +334,33 @@ module ConsoleGuard
     # which change which Rakefile is found -- `--system` loads tasks from
     # $HOME/.rake, and $HOME is /app on a dyno.
     RAKE_OPTIONS = {
-      exact: %w[-A -B -m -n -P -q -s -t -v -V -X -h -H
-                --all --build-all --multitask --dry-run --prereqs
-                --quiet --silent --verbose --version --comments --rules
-                --no-deprecation-warnings --help],
-      value: %w[-T -D -W -j
-                --tasks --describe --where --jobs --trace --backtrace
-                --job-stats],
-      why: [
-        'Options are allowlisted here. Rake evaluates `-e/-p/-E CODE` in',
-        'its own option parser, before the Rakefile is loaded and without',
-        'booting Rails, so nothing that code does reaches the console audit',
-        'hook -- and Rails hands any command it does not recognise to that',
-        'same parser. Options naming a path are excluded for the reason a',
-        'bare `-` is.'
+      exact: [
+        "-A", "-B", "-m", "-n", "-P", "-q", "-s", "-t", "-v", "-V", "-X", "-h", "-H",
+        "--all", "--build-all", "--multitask", "--dry-run", "--prereqs",
+        "--quiet", "--silent", "--verbose", "--version", "--comments", "--rules",
+        "--no-deprecation-warnings", "--help"
       ].freeze,
-      extras: 'task names, VAR=value assignments, and:'
+      value: [
+        "-T", "-D", "-W", "-j",
+        "--tasks", "--describe", "--where", "--jobs", "--trace", "--backtrace",
+        "--job-stats"
+      ].freeze,
+      why: [
+        "Options are allowlisted here. Rake evaluates `-e/-p/-E CODE` in",
+        "its own option parser, before the Rakefile is loaded and without",
+        "booting Rails, so nothing that code does reaches the console audit",
+        "hook -- and Rails hands any command it does not recognise to that",
+        "same parser. Options naming a path are excluded for the reason a",
+        "bare `-` is."
+      ].freeze,
+      extras: "task names, VAR=value assignments, and:"
     }.freeze
 
     OPTIONS = {
-      %w[rails console] => CONSOLE_OPTIONS,
-      %w[rails c] => CONSOLE_OPTIONS,
-      %w[rails runner] => RUNNER_OPTIONS,
-      %w[rails r] => RUNNER_OPTIONS
+      ["rails", "console"] => CONSOLE_OPTIONS,
+      ["rails", "c"] => CONSOLE_OPTIONS,
+      ["rails", "runner"] => RUNNER_OPTIONS,
+      ["rails", "r"] => RUNNER_OPTIONS
     }.freeze
 
     # The width the permitted set is wrapped to for the denial banner.
@@ -368,27 +372,27 @@ module ConsoleGuard
       args.each do |arg|
         # A bare `-` is handled above, with a message about stdin that says more
         # than this one would.
-        next if arg == '-'
-        next unless arg.start_with?('-')
+        next if arg == "-"
+        next unless arg.start_with?("-")
         next if permitted?(arg, allowed)
 
         # Only when it names a command; for `rake -e 1` the "subcommand" is the
         # rejected option itself.
         context = program.dup
-        context << " #{subcommand}" if !subcommand.empty? && !subcommand.start_with?('-')
+        context << " #{subcommand}" if !subcommand.empty? && !subcommand.start_with?("-")
 
-        extras = allowed[:extras].empty? ? '' : " #{allowed[:extras]}"
+        extras = allowed[:extras].empty? ? "" : " #{allowed[:extras]}"
 
-        deny 'option_not_allowed',
-             "`#{program} #{arg}` is not permitted on one-off dynos.",
-             '',
-             *allowed[:why],
-             '',
-             "Permitted after `#{context}`:#{extras}",
-             *wrap_allowed(allowed),
-             '',
-             'Short options are matched whole, so pass them separately rather',
-             'than bundled into one argument.'
+        deny "option_not_allowed",
+          "`#{program} #{arg}` is not permitted on one-off dynos.",
+          "",
+          *allowed[:why],
+          "",
+          "Permitted after `#{context}`:#{extras}",
+          *wrap_allowed(allowed),
+          "",
+          "Short options are matched whole, so pass them separately rather",
+          "than bundled into one argument."
       end
     end
 
@@ -398,7 +402,7 @@ module ConsoleGuard
       allowed[:value].any? do |name|
         next true if token == name
 
-        if name.start_with?('--')
+        if name.start_with?("--")
           token.start_with?("#{name}=")
         else
           token.start_with?(name) && token.bytesize > name.bytesize
@@ -410,14 +414,14 @@ module ConsoleGuard
     # rather than written out again, so the two cannot drift apart.
     def wrap_allowed(allowed)
       lines = []
-      line = +''
+      line = +""
 
       (allowed[:value] + allowed[:exact]).each do |word|
         if line.length + word.length + 1 > WRAP_AT
           lines << "  #{line}"
           line = +word
         else
-          line << ' ' unless line.empty?
+          line << " " unless line.empty?
           line << word
         end
       end

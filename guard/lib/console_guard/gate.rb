@@ -93,7 +93,7 @@ module ConsoleGuard
     EXIT_SENTINEL = "\uFFFF"
     EXIT_MARKER = %(; echo "\uFFFF heroku-command-exit-status: $?").b
 
-    SHELLS = %w[bash sh zsh dash].freeze
+    SHELLS = ["bash", "sh", "zsh", "dash"].freeze
     # `-c`, and the combined short forms such as `-lc` that mean the same thing.
     COMBINED_DASH_C = /\A-[^-].*c\z/
 
@@ -101,7 +101,7 @@ module ConsoleGuard
 
     USAGE = 'heroku run -e "CONSOLE_USER=$(heroku whoami);CONSOLE_REASON=test" rails c -a app_name'
 
-    def initialize(cmdline_path: ENV['CONSOLE_GUARD_CMDLINE'].to_s)
+    def initialize(cmdline_path: ENV["CONSOLE_GUARD_CMDLINE"].to_s)
       @dyno = Dyno.resolve
       # Read up front: both the marker check and the command parsing need it, and
       # a denial needs the marker answer from the very first call site -- the
@@ -132,7 +132,7 @@ module ConsoleGuard
     # What this half judged: the pre-expansion command string, falling back to
     # the login shell's whole argv when there was no command to extract.
     def denial_command
-      @command.empty? ? @argv.join(' ') : @command
+      @command.empty? ? @argv.join(" ") : @command
     end
 
     def dyno_id
@@ -167,17 +167,17 @@ module ConsoleGuard
     end
 
     def extract_command
-      return [''.b, false] if @argv.empty?
-      return [''.b, false] unless SHELLS.include?(File.basename(@argv[0]))
+      return ["".b, false] if @argv.empty?
+      return ["".b, false] unless SHELLS.include?(File.basename(@argv[0]))
 
       (1...@argv.length).each do |index|
         arg = @argv[index]
-        next unless arg == '-c' || COMBINED_DASH_C.match?(arg)
+        next unless arg == "-c" || COMBINED_DASH_C.match?(arg)
 
         return [strip_exit_marker(@argv[index + 1].to_s.b), true]
       end
 
-      [''.b, false]
+      ["".b, false]
     end
 
     # Removed before anything vets or reports the command, so `heroku run
@@ -192,22 +192,22 @@ module ConsoleGuard
     # If Heroku changes the marker this stops matching and CI is denied again --
     # noisy, but the safe direction to fail in.
     def strip_exit_marker(command)
-      candidate = command.sub(TRAILING_SPACE, '')
+      candidate = command.sub(TRAILING_SPACE, "")
       return command unless candidate.end_with?(EXIT_MARKER)
 
-      candidate[0, candidate.bytesize - EXIT_MARKER.bytesize].sub(TRAILING_SPACE, '')
+      candidate[0, candidate.bytesize - EXIT_MARKER.bytesize].sub(TRAILING_SPACE, "")
     end
 
     def refuse_spoofed_dyno
       Banner.render(
         ["$DYNO (#{@dyno.claimed_name}) does not match this dyno's metadata",
-         "(#{@dyno.metadata_name}). Refusing to run."],
+          "(#{@dyno.metadata_name}). Refusing to run."],
         enforcing: true
       )
       # Recorded with the metadata's dyno id, not $DYNO's, so the record files
       # under the dyno this actually is.
-      Reporter.report(rule: 'dyno_name_spoofed', command: "$DYNO=#{@dyno.claimed_name}",
-                      enforced: true, dyno_id: @dyno.metadata_id)
+      Reporter.report(rule: "dyno_name_spoofed", command: "$DYNO=#{@dyno.claimed_name}",
+        enforced: true, dyno_id: @dyno.metadata_id)
 
       # Fatal in both enforcement modes. This is not a command-policy decision an
       # operator can be warned about; it is an attempt to change which dyno the
@@ -220,13 +220,13 @@ module ConsoleGuard
     def require_wrapper
       return if WRAPPER_NAMES.all? { |name| File.executable?(File.join(ConsoleGuard.wrapper_dir, name)) }
 
-      deny 'wrapper_missing',
-           'The console guard command wrapper is missing from this dyno.',
-           '',
-           "Expected: #{ConsoleGuard.wrapper_dir}/{rails,rake,bundle}",
-           '',
-           'This is a build problem, not an operator mistake. Redeploy the',
-           'app; if it persists the buildpack is misconfigured.'
+      deny "wrapper_missing",
+        "The console guard command wrapper is missing from this dyno.",
+        "",
+        "Expected: #{ConsoleGuard.wrapper_dir}/{rails,rake,bundle}",
+        "",
+        "This is a build problem, not an operator mistake. Redeploy the",
+        "app; if it persists the buildpack is misconfigured."
     end
 
     def require_identity
@@ -235,29 +235,29 @@ module ConsoleGuard
       # failed `heroku whoami` substituting an empty string -- looks like neither
       # was set.
       missing = []
-      missing << 'CONSOLE_USER' if ConsoleGuard.blank?(ENV['CONSOLE_USER'])
-      missing << 'CONSOLE_REASON' if ConsoleGuard.blank?(ENV['CONSOLE_REASON'])
+      missing << "CONSOLE_USER" if ConsoleGuard.blank?(ENV["CONSOLE_USER"])
+      missing << "CONSOLE_REASON" if ConsoleGuard.blank?(ENV["CONSOLE_REASON"])
 
       unless missing.empty?
         described = if missing.length == 2
-                      'CONSOLE_USER and CONSOLE_REASON are'
-                    else
-                      "#{missing.first} is"
-                    end
+          "CONSOLE_USER and CONSOLE_REASON are"
+        else
+          "#{missing.first} is"
+        end
 
-        deny 'identity_missing',
-             "#{described} not set.",
-             '',
-             'Both are required on one-off dynos. CONSOLE_USER must be your',
-             '`heroku whoami` value, so that console records can be compared',
-             "against Heroku's own audit trail.",
-             '',
-             'If you built CONSOLE_USER from `heroku whoami`, check that it',
-             'succeeded -- an expired login makes it print an error and return',
-             'an empty string, which arrives here as unset.',
-             '',
-             'Usage:',
-             "  #{USAGE}"
+        deny "identity_missing",
+          "#{described} not set.",
+          "",
+          "Both are required on one-off dynos. CONSOLE_USER must be your",
+          "`heroku whoami` value, so that console records can be compared",
+          "against Heroku's own audit trail.",
+          "",
+          "If you built CONSOLE_USER from `heroku whoami`, check that it",
+          "succeeded -- an expired login makes it print an error and return",
+          "an empty string, which arrives here as unset.",
+          "",
+          "Usage:",
+          "  #{USAGE}"
       end
 
       # console1984 raises MissingUsername on an empty CONSOLE_USER
@@ -267,7 +267,7 @@ module ConsoleGuard
       # placeholder instead; see GATED_ANONYMOUS.
       #
       # Only in dry-run mode. When enforcing, the denial above has already exited.
-      @anonymous = true if !enforcing? && ConsoleGuard.blank?(ENV['CONSOLE_USER'])
+      @anonymous = true if !enforcing? && ConsoleGuard.blank?(ENV["CONSOLE_USER"])
     end
 
     # Positioned after the identity gate, so that a CI caller who is missing a
@@ -275,30 +275,30 @@ module ConsoleGuard
     def require_readable_command
       if @argv.empty?
         # Fail closed: if we cannot read the command, we cannot vet it.
-        deny 'command_unreadable',
-             'Could not read the dyno command.',
-             '',
-             '/proc/$$/cmdline is empty or unreadable, and the console gate',
-             'cannot vet a command it cannot see, so the session is refused.',
-             '',
-             'This is a platform or build problem, not an operator mistake.'
+        deny "command_unreadable",
+          "Could not read the dyno command.",
+          "",
+          "/proc/$$/cmdline is empty or unreadable, and the console gate",
+          "cannot vet a command it cannot see, so the session is refused.",
+          "",
+          "This is a platform or build problem, not an operator mistake."
       elsif !@command_read || ConsoleGuard.blank?(@command)
         # No `-c` payload means this is not the `bash -c <command>` shape the
         # gate is built on: the login shell was invoked some other way, or the
         # command arrives on stdin. There is no command string to vet, so refuse
         # -- and say so.
         @command_read = false
-        deny 'command_not_bash_c',
-             'Could not determine the dyno command.',
-             '',
-             "The gate expects this session's login shell to have been invoked",
-             'as `bash -c <command>`. It was not, so there is no command',
-             'string to vet and the session is refused.',
-             '',
-             'Login shell argv:',
-             "  #{Banner.show(@argv.join(' '))}",
-             '',
-             'This is a platform or build problem, not an operator mistake.'
+        deny "command_not_bash_c",
+          "Could not determine the dyno command.",
+          "",
+          "The gate expects this session's login shell to have been invoked",
+          "as `bash -c <command>`. It was not, so there is no command",
+          "string to vet and the session is refused.",
+          "",
+          "Login shell argv:",
+          "  #{Banner.show(@argv.join(" "))}",
+          "",
+          "This is a platform or build problem, not an operator mistake."
       end
     end
 
@@ -318,16 +318,16 @@ module ConsoleGuard
       return unless @command_read
       return unless COMPOUND.match?(@command)
 
-      deny 'compound_statement',
-           'Compound statements and redirections are not permitted on one-off',
-           'dynos.',
-           '',
-           'The command may not contain any of:  ;  &  |  `  $(  <  >  newline',
-           '',
-           'Command:',
-           "  #{Banner.show(@command)}",
-           '',
-           'Run each command as its own `heroku run`.'
+      deny "compound_statement",
+        "Compound statements and redirections are not permitted on one-off",
+        "dynos.",
+        "",
+        "The command may not contain any of:  ;  &  |  `  $(  <  >  newline",
+        "",
+        "Command:",
+        "  #{Banner.show(@command)}",
+        "",
+        "Run each command as its own `heroku run`."
     end
 
     # Only `rails`, `rake` and `bundle` are permitted, because those are the only
@@ -356,24 +356,24 @@ module ConsoleGuard
       first_word = @command.split(/[ \t\n]+/n).reject(&:empty?).first.to_s
       return if WRAPPER_NAMES.include?(first_word)
 
-      deny 'command_not_allowed',
-           'This command is not permitted on one-off dynos.',
-           '',
-           'Command:',
-           "  #{Banner.show(@command)}",
-           'Rejected because its first word is:',
-           "  #{Banner.show(first_word)}",
-           '',
-           'Allowed:',
-           '  rails <task>',
-           '  rake <task>',
-           '  bundle exec rails|rake <task>',
-           '',
-           'The name must be unqualified -- `rails`, not `bin/rails` --',
-           'and may not be preceded by a VAR=value assignment.',
-           '',
-           'Example:',
-           "  #{USAGE}"
+      deny "command_not_allowed",
+        "This command is not permitted on one-off dynos.",
+        "",
+        "Command:",
+        "  #{Banner.show(@command)}",
+        "Rejected because its first word is:",
+        "  #{Banner.show(first_word)}",
+        "",
+        "Allowed:",
+        "  rails <task>",
+        "  rake <task>",
+        "  bundle exec rails|rake <task>",
+        "",
+        "The name must be unqualified -- `rails`, not `bin/rails` --",
+        "and may not be preceded by a VAR=value assignment.",
+        "",
+        "Example:",
+        "  #{USAGE}"
     end
 
     # A configuration error on the app, not an operator mistake, so it warns
@@ -381,10 +381,10 @@ module ConsoleGuard
     def warn_without_metadata
       return if @dyno.correlatable?
 
-      app = ENV['HEROKU_APP_NAME'].to_s
-      app = 'app_name' if app.empty?
+      app = ENV["HEROKU_APP_NAME"].to_s
+      app = "app_name" if app.empty?
 
-      $stderr.puts <<~WARNING
+      warn <<~WARNING
 
         WARNING: dyno metadata is not enabled on this app, so this session
                  cannot be correlated with Heroku's audit trail, and the gate

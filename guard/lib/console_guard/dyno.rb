@@ -22,25 +22,25 @@ module ConsoleGuard
     # empty on a real dyno, and reading it instead would silently defeat the
     # spoof check below.
     def self.read_metadata(path)
-      dyno = JSON.parse(File.read(path))['dyno']
+      dyno = JSON.parse(File.read(path))["dyno"]
       return {} unless dyno.is_a?(Hash)
 
-      { metadata_name: dyno['name'].to_s, metadata_id: dyno['id'].to_s }
+      {metadata_name: dyno["name"].to_s, metadata_id: dyno["id"].to_s}
     rescue StandardError
       {}
     end
 
-    def initialize(metadata_name: '', metadata_id: '')
+    def initialize(metadata_name: "", metadata_id: "")
       @metadata_name = metadata_name
       @metadata_id = metadata_id
-      @claimed_name = ENV['DYNO'].to_s
+      @claimed_name = ENV["DYNO"].to_s
 
       if metadata_seen?
         @name = metadata_name
-        @id = metadata_id.empty? ? ENV['HEROKU_DYNO_ID'].to_s : metadata_id
+        @id = metadata_id.empty? ? ENV["HEROKU_DYNO_ID"].to_s : metadata_id
       else
         @name = @claimed_name
-        @id = ENV['HEROKU_DYNO_ID'].to_s
+        @id = ENV["HEROKU_DYNO_ID"].to_s
       end
     end
 
@@ -70,11 +70,11 @@ module ConsoleGuard
     def gated?
       # No dyno name from either source. Assume a one-off dyno and gate it,
       # rather than letting a command through ungated.
-      @name.start_with?('run.') || @name.empty?
+      @name.start_with?("run.") || @name.empty?
     end
 
     def audited?
-      gated? || @name.start_with?('scheduler.', 'release.')
+      gated? || @name.start_with?("scheduler.", "release.")
     end
   end
 end

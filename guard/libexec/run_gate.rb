@@ -11,6 +11,6 @@
 # so that the interpreter and its flags are chosen by the caller rather than by
 # a PATH lookup an operator can influence.
 
-require_relative '../lib/console_guard'
+require_relative "../lib/console_guard"
 
 exit ConsoleGuard::Gate.new.run

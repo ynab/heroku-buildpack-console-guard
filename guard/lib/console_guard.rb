@@ -20,21 +20,21 @@
 # answered by an operator's file. Its entries are dropped before the first
 # require. Our own files are reached with require_relative, which never consults
 # $LOAD_PATH at all.
-ENV['RUBYLIB'].to_s.split(File::PATH_SEPARATOR).each do |dir|
+ENV["RUBYLIB"].to_s.split(File::PATH_SEPARATOR).each do |dir|
   next if dir.empty?
 
   $LOAD_PATH.delete(dir)
   $LOAD_PATH.delete(File.expand_path(dir))
 end
 
-require 'json'
-require 'net/http'
-require 'uri'
+require "json"
+require "net/http"
+require "uri"
 
-require_relative 'console_guard/config'
-require_relative 'console_guard/banner'
-require_relative 'console_guard/reporter'
-require_relative 'console_guard/denials'
-require_relative 'console_guard/dyno'
-require_relative 'console_guard/gate'
-require_relative 'console_guard/command'
+require_relative "console_guard/config"
+require_relative "console_guard/banner"
+require_relative "console_guard/reporter"
+require_relative "console_guard/denials"
+require_relative "console_guard/dyno"
+require_relative "console_guard/gate"
+require_relative "console_guard/command"

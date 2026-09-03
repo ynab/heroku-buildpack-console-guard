@@ -3,19 +3,19 @@
 module ConsoleGuard
   # The denial banner an operator sees on their terminal.
   module Banner
-    RULE = '=' * 42
+    RULE = "=" * 42
 
     # Lines may carry the operator's own command, which need not be valid UTF-8,
     # so they are written rather than interpolated into one string.
     def self.render(lines, enforcing:, io: $stderr)
       io.write("\n", RULE, "\n")
-      lines.each { |line| io.write('  ', line.to_s, "\n") }
+      lines.each { |line| io.write("  ", line.to_s, "\n") }
       unless enforcing
         io.write("\n")
         io.write("  CONSOLE_BLOCK_ENFORCE=false -- dry-run mode, permitting anyway.\n")
         io.write("  This command WILL BE BLOCKED once enforcement is enabled.\n")
       end
-      io.write('  console-guard ', VERSION, "\n")
+      io.write("  console-guard ", VERSION, "\n")
       io.write(RULE, "\n\n")
       io.flush
     end

@@ -16,7 +16,7 @@ module ConsoleGuard
       # enforcement would block, which is only measurable if the would-be
       # denials are recorded.
       Reporter.report(rule: rule, command: denial_command, enforced: enforcing?,
-                      dyno_id: dyno_id)
+        dyno_id: dyno_id)
 
       return unless enforcing?
 
@@ -30,6 +30,7 @@ module ConsoleGuard
 
     # Hook for anything a half must do on its way out. Only the profile half has
     # one; see ConsoleGuard::Gate.
-    def before_exit; end
+    def before_exit
+    end
   end
 end

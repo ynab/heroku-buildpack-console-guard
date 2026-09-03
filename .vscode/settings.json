@@ -1,0 +1,18 @@
+{
+  // Applied to files in this project when the folder is opened directly.
+  "editor.formatOnPaste": false,
+  "[ruby]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "rubocop.vscode-rubocop"
+  },
+  "[json][jsonc][yaml]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  // The rubocop extension owns diagnostics and formatting for Ruby, so ruby-lsp
+  // must not also offer them -- two formatters on save fight each other.
+  "rubyLsp.enabledFeatures": {
+    "diagnostics": false,
+    "formatting": false
+  }
+}

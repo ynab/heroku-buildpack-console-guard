@@ -8,8 +8,13 @@
 *.swp
 *.swo
 *~
-.vscode/
 .idea/
+
+# .vscode is committed: it carries the shared formatter and extension setup.
+# Personal overrides go in the user or workspace settings, not here.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 
 # Claude Code
 .claude/settings.local.json

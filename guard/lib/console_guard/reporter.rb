@@ -63,8 +63,8 @@ module ConsoleGuard
   # denial record with `heroku run -e CONSOLE_LOGGING_DATADOG_PROXY_URL=`. What
   # survives that is the `api:dyno` webhook and the exit status. See the README.
   module Reporter
-    URL_VAR = 'CONSOLE_LOGGING_DATADOG_PROXY_URL'
-    EVENT = 'command_denied'
+    URL_VAR = "CONSOLE_LOGGING_DATADOG_PROXY_URL"
+    EVENT = "command_denied"
     OPEN_TIMEOUT = 2
     MAX_TIME = 4
     # Matches the denial banner, so the record and the banner agree on what the
@@ -90,25 +90,25 @@ module ConsoleGuard
 
     def self.body(rule:, command:, enforced:, dyno_id:)
       fields = {
-        'event' => EVENT,
-        'enforced' => enforced,
-        'rule' => ascii(rule.to_s.empty? ? 'unknown' : rule),
-        'command' => ascii(truncate(command)),
-        'operator' => ascii(ENV['CONSOLE_USER']),
-        'reason' => ascii(ENV['CONSOLE_REASON']),
+        "event" => EVENT,
+        "enforced" => enforced,
+        "rule" => ascii(rule.to_s.empty? ? "unknown" : rule),
+        "command" => ascii(truncate(command)),
+        "operator" => ascii(ENV["CONSOLE_USER"]),
+        "reason" => ascii(ENV["CONSOLE_REASON"]),
         # Resolved from the dyno metadata file, which the profile script refuses
         # a session for when $DYNO disagrees with it. HEROKU_DYNO_ID is the
         # fallback and is `-e`-settable, so it is only as good as the app's
         # metadata being enabled.
-        'dyno_id' => ascii(dyno_id),
+        "dyno_id" => ascii(dyno_id),
         # Attribution, so `@app` and `@app_service` reach this record too.
-        'app' => ascii(ENV['HEROKU_APP_NAME']),
-        'service' => ascii(ENV['DD_SERVICE']),
-        'guard_version' => ascii(VERSION),
+        "app" => ascii(ENV["HEROKU_APP_NAME"]),
+        "service" => ascii(ENV["DD_SERVICE"]),
+        "guard_version" => ascii(VERSION),
         # datadog-proxy claims `timestamp` as the log's official date, exactly as
         # it does for the gem's records, so a denial is filed at the moment it
         # happened.
-        'timestamp' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        "timestamp" => Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
       }
       # Omitted rather than null so that a missing operator reads as absent in
       # Datadog rather than as the string "null".
@@ -147,13 +147,13 @@ module ConsoleGuard
       endpoint, user, password = split_userinfo(url)
       uri = URI.parse(endpoint)
 
-      request = Net::HTTP::Post.new(uri.request_uri, 'Content-Type' => 'application/json')
+      request = Net::HTTP::Post.new(uri.request_uri, "Content-Type" => "application/json")
       # curl takes Basic credentials from the URL's userinfo; Net::HTTP does not.
       request.basic_auth(user, password.to_s) if user
       request.body = json
 
       http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == 'https'
+      http.use_ssl = uri.scheme == "https"
       http.open_timeout = OPEN_TIMEOUT
       http.read_timeout = MAX_TIME
       http.write_timeout = MAX_TIME
@@ -172,19 +172,19 @@ module ConsoleGuard
     # close. Never fatal: refusing the command is the control, and recording it
     # must not be able to hold that up.
     def self.failed(detail)
-      $stderr.puts "console-guard: denial not recorded (#{URL_VAR} returned #{detail})"
+      warn "console-guard: denial not recorded (#{URL_VAR} returned #{detail})"
     end
 
     # `URI.parse` is strict about what a userinfo may contain and the credential
     # here is whatever the proxy issued, so it is lifted out before parsing
     # rather than parsed and read back off.
-    USERINFO = %r{\A(?<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?<userinfo>[^/@]*)@(?<rest>.*)\z}m
+    USERINFO = %r{\A(?<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?<userinfo>[^/@]*)@(?<rest>.*)\z}m
 
     def self.split_userinfo(url)
       match = USERINFO.match(url)
       return [url, nil, nil] unless match
 
-      user, _, password = match[:userinfo].partition(':')
+      user, _, password = match[:userinfo].partition(":")
       ["#{match[:scheme]}#{match[:rest]}", unescape(user), unescape(password)]
     end
 

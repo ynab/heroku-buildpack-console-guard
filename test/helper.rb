@@ -16,46 +16,46 @@
 # prepending PATH, finding the wrapper -- is not covered here. That is
 # test/run_tests.sh, which needs a Linux login shell for it.
 
-require 'minitest/autorun'
-require 'English'
-require 'fileutils'
-require 'json'
-require 'rbconfig'
-require 'tmpdir'
+require "minitest/autorun"
+require "English"
+require "fileutils"
+require "json"
+require "rbconfig"
+require "tmpdir"
 
 module ConsoleGuardTest
-  ROOT = File.expand_path('..', __dir__)
-  TMP = Dir.mktmpdir('console-guard-test')
+  ROOT = File.expand_path("..", __dir__)
+  TMP = Dir.mktmpdir("console-guard-test")
 
-  APP = File.join(TMP, 'app')
-  METADATA = File.join(TMP, 'dyno-metadata.json')
-  FAKE_BIN = File.join(TMP, 'fakebin')
+  APP = File.join(TMP, "app")
+  METADATA = File.join(TMP, "dyno-metadata.json")
+  FAKE_BIN = File.join(TMP, "fakebin")
   # The same fakes in a directory whose name is a shell metacharacter, for the
   # case where the resolved binary's path must not reach a shell.
-  HOSTILE_BIN = File.join(TMP, 'fake;echo PWNED')
+  HOSTILE_BIN = File.join(TMP, "fake;echo PWNED")
   # Two files a test can name where one has to exist on disk, for the `rails
   # runner <path>` rule -- which turns on exactly that, as Rails' own does.
-  ON_DISK = %w[script.rb payload.rb].freeze
+  ON_DISK = ["script.rb", "payload.rb"].freeze
 
   RUBY = RbConfig.ruby
-  GATE = File.join(APP, '.console-guard/libexec/run_gate.rb')
-  WRAPPER = File.join(APP, '.console-guard/libexec/run_command.rb')
+  GATE = File.join(APP, ".console-guard/libexec/run_gate.rb")
+  WRAPPER = File.join(APP, ".console-guard/libexec/run_command.rb")
 
-  RECORD_LOG = File.join(TMP, 'records.log')
-  RECORD_PORT_FILE = File.join(TMP, 'recorder.port')
-  RECORD_PATH = '/webhooks/console_audit'
+  RECORD_LOG = File.join(TMP, "records.log")
+  RECORD_PORT_FILE = File.join(TMP, "recorder.port")
+  RECORD_PATH = "/webhooks/console_audit"
   # In the URL as it is in the real config var, so a test can prove it never
   # reaches the operator.
-  RECORD_CRED = 's3cr3t-not-for-operators'
+  RECORD_CRED = "s3cr3t-not-for-operators"
 
   # The environment a gated `heroku run` arrives with. Individual tests override
   # what they are about and inherit the rest, so a case reads as its own subject.
   BASE_ENV = {
-    'HOME' => APP,
-    'DYNO' => 'run.1234',
-    'CONSOLE_USER' => 'becky',
-    'CONSOLE_REASON' => 'testing',
-    'PATH' => "#{FAKE_BIN}:/usr/local/bin:/usr/bin:/bin"
+    "HOME" => APP,
+    "DYNO" => "run.1234",
+    "CONSOLE_USER" => "becky",
+    "CONSOLE_REASON" => "testing",
+    "PATH" => "#{FAKE_BIN}:/usr/local/bin:/usr/bin:/bin"
   }.freeze
 
   Result = Struct.new(:status, :stdout, :stderr) do
@@ -68,7 +68,7 @@ module ConsoleGuardTest
     end
 
     def ran?
-      stdout.include?('RAN ')
+      stdout.include?("RAN ")
     end
   end
 
@@ -80,12 +80,12 @@ module ConsoleGuardTest
     end
 
     def build!
-      env_dir = File.join(TMP, 'env')
-      FileUtils.mkdir_p([APP, env_dir, File.join(TMP, 'cache')])
-      File.write(File.join(env_dir, 'CONSOLE_GUARD_DYNO_METADATA_FILE'), METADATA)
+      env_dir = File.join(TMP, "env")
+      FileUtils.mkdir_p([APP, env_dir, File.join(TMP, "cache")])
+      File.write(File.join(env_dir, "CONSOLE_GUARD_DYNO_METADATA_FILE"), METADATA)
 
-      log = IO.popen([File.join(ROOT, 'bin/compile'), APP, File.join(TMP, 'cache'), env_dir],
-                     err: %i[child out], &:read)
+      log = IO.popen([File.join(ROOT, "bin/compile"), APP, File.join(TMP, "cache"), env_dir],
+        err: [:child, :out], &:read)
       raise "bin/compile failed:\n#{log}" unless $CHILD_STATUS.success?
 
       ON_DISK.each { |name| FileUtils.touch(File.join(APP, name)) }
@@ -96,7 +96,7 @@ module ConsoleGuardTest
     def fake_binaries!
       [FAKE_BIN, HOSTILE_BIN].each do |dir|
         FileUtils.mkdir_p(dir)
-        %w[rails rake bundle].each do |name|
+        ["rails", "rake", "bundle"].each do |name|
           path = File.join(dir, name)
           File.write(path, "#!/bin/sh\necho \"RAN #{name} $*\"\n")
           File.chmod(0o755, path)
@@ -105,16 +105,16 @@ module ConsoleGuardTest
     end
 
     def start_recorder!
-      File.write(RECORD_LOG, '')
-      @recorder = spawn(RUBY, File.join(ROOT, 'test/lib/recorder.rb'),
-                        RECORD_LOG, RECORD_PORT_FILE)
+      File.write(RECORD_LOG, "")
+      @recorder = spawn(RUBY, File.join(ROOT, "test/lib/recorder.rb"),
+        RECORD_LOG, RECORD_PORT_FILE)
 
       40.times do
         break if File.size?(RECORD_PORT_FILE)
 
         sleep 0.05
       end
-      raise 'the denial recorder did not start' unless File.size?(RECORD_PORT_FILE)
+      raise "the denial recorder did not start" unless File.size?(RECORD_PORT_FILE)
 
       @port = File.read(RECORD_PORT_FILE).strip
     end
@@ -126,7 +126,7 @@ module ConsoleGuardTest
     end
 
     def teardown!
-      Process.kill('TERM', @recorder) if @recorder
+      Process.kill("TERM", @recorder) if @recorder
       FileUtils.remove_entry(TMP)
     rescue StandardError
       nil
@@ -144,10 +144,10 @@ class GuardTest < Minitest::Test
   def setup
     # Present unless a test says otherwise, so the metadata-absent path is never
     # reached by accident and read as a pass.
-    write_metadata('dyno' => { 'id' => 'dyno-uuid-1', 'name' => 'run.1234' },
-                   'app' => { 'id' => 'aid', 'name' => '' },
-                   'release' => { 'id' => 117 })
-    File.write(ConsoleGuardTest::RECORD_LOG, '')
+    write_metadata("dyno" => {"id" => "dyno-uuid-1", "name" => "run.1234"},
+      "app" => {"id" => "aid", "name" => ""},
+      "release" => {"id" => 117})
+    File.write(ConsoleGuardTest::RECORD_LOG, "")
   end
 
   def write_metadata(value)
@@ -160,11 +160,11 @@ class GuardTest < Minitest::Test
   # `bash -c`. Pass `argv:` instead to control the whole login-shell argv, which
   # is what the "the gate cannot read this" cases are about.
   def gate(command = nil, env: {}, argv: nil)
-    argv ||= ['bash', '-c', command]
-    cmdline = File.join(ConsoleGuardTest::TMP, 'cmdline.bin')
+    argv ||= ["bash", "-c", command]
+    cmdline = File.join(ConsoleGuardTest::TMP, "cmdline.bin")
     File.binwrite(cmdline, argv.map { |a| "#{a}\0" }.join)
 
-    run_guard(ConsoleGuardTest::GATE, [], env.merge('CONSOLE_GUARD_CMDLINE' => cmdline))
+    run_guard(ConsoleGuardTest::GATE, [], env.merge("CONSOLE_GUARD_CMDLINE" => cmdline))
   end
 
   # Run the command-wrapper half. `program` is the name it was invoked under,
@@ -174,8 +174,8 @@ class GuardTest < Minitest::Test
   end
 
   def run_guard(entry_point, args, env)
-    out_path = File.join(ConsoleGuardTest::TMP, 'stdout')
-    err_path = File.join(ConsoleGuardTest::TMP, 'stderr')
+    out_path = File.join(ConsoleGuardTest::TMP, "stdout")
+    err_path = File.join(ConsoleGuardTest::TMP, "stderr")
 
     child_env = ConsoleGuardTest::BASE_ENV.merge(env)
     # nil means "unset this", which is a different thing from empty and is the
@@ -183,11 +183,11 @@ class GuardTest < Minitest::Test
     child_env.each_key { |key| child_env[key] = nil if child_env[key].nil? }
 
     pid = spawn(child_env,
-                # The flags the shell stubs pass, so the tests run the
-                # interpreter the way a dyno does.
-                ConsoleGuardTest::RUBY, '--disable=gems,rubyopt', entry_point, *args,
-                unsetenv_others: true, chdir: ConsoleGuardTest::APP,
-                out: out_path, err: err_path)
+      # The flags the shell stubs pass, so the tests run the
+      # interpreter the way a dyno does.
+      ConsoleGuardTest::RUBY, "--disable=gems,rubyopt", entry_point, *args,
+      unsetenv_others: true, chdir: ConsoleGuardTest::APP,
+      out: out_path, err: err_path)
     Process.wait(pid)
 
     # Read as bytes. A dyno runs in the C locale, so Encoding.default_external
@@ -201,7 +201,7 @@ class GuardTest < Minitest::Test
   def assert_denied(result, expected = nil, message = nil)
     refute result.ran?, "expected a denial, but the command ran:\n#{result.output}"
     assert_equal 1, result.status,
-                 "expected exit 1, got #{result.status}:\n#{result.output}"
+      "expected exit 1, got #{result.status}:\n#{result.output}"
     return unless expected
 
     assert_includes result.output, expected.b, message
@@ -223,14 +223,14 @@ class GuardTest < Minitest::Test
   # ---------------------------------------------------------------- records
 
   def reporting_env(path = ConsoleGuardTest::RECORD_PATH)
-    { 'CONSOLE_LOGGING_DATADOG_PROXY_URL' => ConsoleGuardTest.report_url(path) }
+    {"CONSOLE_LOGGING_DATADOG_PROXY_URL" => ConsoleGuardTest.report_url(path)}
   end
 
   # The denial records POSTed since this test started, as parsed JSON.
   def records
     File.binread(ConsoleGuardTest::RECORD_LOG)
-        .lines
-        .filter_map { |line| JSON.parse(line.delete_prefix('BODY ')) if line.start_with?('BODY ') }
+      .lines
+      .filter_map { |line| JSON.parse(line.delete_prefix("BODY ")) if line.start_with?("BODY ") }
   end
 
   def raw_records

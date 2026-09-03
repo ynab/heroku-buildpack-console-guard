@@ -13,6 +13,6 @@
 #
 # No shebang, for the reason given in run_gate.rb.
 
-require_relative '../lib/console_guard'
+require_relative "../lib/console_guard"
 
 ConsoleGuard::Command.new(ARGV.shift.to_s, ARGV).run

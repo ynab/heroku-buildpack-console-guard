@@ -13,25 +13,25 @@
 # Deliberately a raw TCPServer: the suite runs on whatever Ruby the stack image
 # has, with no gems and no webrick.
 
-require 'socket'
+require "socket"
 
 log_path, port_path = ARGV
-abort 'usage: recorder.rb <log path> <port file>' unless log_path && port_path
+abort "usage: recorder.rb <log path> <port file>" unless log_path && port_path
 
-server = TCPServer.new('127.0.0.1', 0)
+server = TCPServer.new("127.0.0.1", 0)
 File.write(port_path, server.addr[1].to_s)
 
-log = File.open(log_path, 'a')
+log = File.open(log_path, "a")
 log.sync = true
 
 loop do
   socket = server.accept
   begin
     request_line = socket.gets.to_s
-    path = request_line.split(' ')[1].to_s
+    path = request_line.split(" ")[1].to_s
 
     length = 0
-    auth = ''
+    auth = ""
     while (header = socket.gets)
       break if header.strip.empty?
 
@@ -40,13 +40,13 @@ loop do
       when /\AAuthorization:\s*(.+)/i then auth = ::Regexp.last_match(1).strip
       end
     end
-    body = length.positive? ? socket.read(length).to_s : ''
+    body = length.positive? ? socket.read(length).to_s : ""
 
     log.write("PATH #{path}\n")
     log.write("AUTH #{auth}\n")
     log.write("BODY #{body}\n")
 
-    status = path.include?('fail-me') ? '500 Internal Server Error' : '202 Accepted'
+    status = path.include?("fail-me") ? "500 Internal Server Error" : "202 Accepted"
     socket.write("HTTP/1.1 #{status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
   rescue StandardError
     # A malformed or abandoned request must not take the recorder down and turn

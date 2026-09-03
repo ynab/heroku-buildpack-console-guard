@@ -1,0 +1,27 @@
+require:
+  - standard
+
+plugins:
+  - standard-custom
+  - standard-performance
+  - rubocop-performance
+
+inherit_gem:
+  standard: config/base.yml
+  standard-performance: config/base.yml
+  standard-custom: config/base.yml
+
+# standard rewrites `rescue StandardError` to a bare `rescue`. Kept explicit
+# here: every one of these rescues is a deliberate "whatever goes wrong, degrade
+# this way" -- unparseable dyno metadata, an unreachable reporting endpoint, an
+# unreadable /proc entry -- and the bare form is the least obvious way to say
+# that in code whose failure modes are the point.
+Style/RescueStandardError:
+  Enabled: false
+
+AllCops:
+  SuggestExtensions: false
+  NewCops: enable
+  TargetRubyVersion: 3.0
+  Exclude:
+    - "vendor/**/*"
