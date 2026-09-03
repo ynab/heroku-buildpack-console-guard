@@ -277,6 +277,18 @@ class CommandTest < GuardTest
     assert_includes result.output, 'WILL BE BLOCKED'
   end
 
+  def test_the_resolved_path_is_never_handed_to_a_shell
+    # Ruby's `exec` picks its own dispatch: a single string is scanned for shell
+    # metacharacters and falls back to `/bin/sh -c`. A permitted command with no
+    # arguments is exactly that single-string case, and the path is assembled
+    # from the operator-settable PATH -- so the array form in Command#run is
+    # what stops a directory name from becoming a shell escape.
+    result = wrapper('rails', env: { 'PATH' => ConsoleGuardTest::HOSTILE_BIN })
+
+    assert_ran result, 'rails'
+    refute_includes result.output, 'PWNED'
+  end
+
   def test_denials_name_the_guard_version
     # So an operator's report identifies the deployed guard exactly.
     assert_denied wrapper('rails', 'dbconsole'), 'console-guard '

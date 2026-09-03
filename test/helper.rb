@@ -30,6 +30,9 @@ module ConsoleGuardTest
   APP = File.join(TMP, 'app')
   METADATA = File.join(TMP, 'dyno-metadata.json')
   FAKE_BIN = File.join(TMP, 'fakebin')
+  # The same fakes in a directory whose name is a shell metacharacter, for the
+  # case where the resolved binary's path must not reach a shell.
+  HOSTILE_BIN = File.join(TMP, 'fake;echo PWNED')
   # Two files a test can name where one has to exist on disk, for the `rails
   # runner <path>` rule -- which turns on exactly that, as Rails' own does.
   ON_DISK = %w[script.rb payload.rb].freeze
@@ -91,11 +94,13 @@ module ConsoleGuardTest
     # Stand in for the real rails/rake/bundle the wrapper execs into, so a test
     # can tell "blocked" from "ran, with exactly these arguments".
     def fake_binaries!
-      FileUtils.mkdir_p(FAKE_BIN)
-      %w[rails rake bundle].each do |name|
-        path = File.join(FAKE_BIN, name)
-        File.write(path, "#!/bin/sh\necho \"RAN #{name} $*\"\n")
-        File.chmod(0o755, path)
+      [FAKE_BIN, HOSTILE_BIN].each do |dir|
+        FileUtils.mkdir_p(dir)
+        %w[rails rake bundle].each do |name|
+          path = File.join(dir, name)
+          File.write(path, "#!/bin/sh\necho \"RAN #{name} $*\"\n")
+          File.chmod(0o755, path)
+        end
       end
     end
 

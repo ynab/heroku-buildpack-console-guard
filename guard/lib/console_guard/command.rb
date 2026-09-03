@@ -41,8 +41,13 @@ module ConsoleGuard
       # apply_policy will exit if the command is denied, so reaching this point
       # means the command is allowed.
 
-      # The [command, argv0] form, so a path containing shell metacharacters can
-      # never be handed to a shell.
+      # Array form, which always execs directly. Do not simplify it to
+      # `exec(real, *@argv)`: handed a single string -- which is what a bare
+      # `rails` with no arguments leaves -- Ruby scans that string for shell
+      # metacharacters and falls back to `/bin/sh -c`. `real` is assembled from
+      # PATH, and `heroku run -e` sets PATH, so a directory with a `;` in its
+      # name would become a shell escape out of the thing whose job is
+      # preventing them. argv[0] is the resolved path either way.
       exec([real, real], *@argv)
     end
 
