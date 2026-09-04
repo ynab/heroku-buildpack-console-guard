@@ -198,21 +198,19 @@ module ConsoleGuard
       candidate[0, candidate.bytesize - EXIT_MARKER.bytesize].sub(TRAILING_SPACE, "")
     end
 
+    # Fatal in both enforcement modes. This is not a command-policy decision an
+    # operator can be warned about; it is an attempt to change which dyno the
+    # guard believes it is running on.
+    #
+    # Recorded with the metadata's dyno id, not $DYNO's, so the record files
+    # under the dyno this actually is.
     def refuse_spoofed_dyno
-      Banner.render(
-        ["$DYNO (#{@dyno.claimed_name}) does not match this dyno's metadata",
-          "(#{@dyno.metadata_name}). Refusing to run."],
-        enforcing: true
-      )
-      # Recorded with the metadata's dyno id, not $DYNO's, so the record files
-      # under the dyno this actually is.
-      Reporter.report(rule: "dyno_name_spoofed", command: "$DYNO=#{@dyno.claimed_name}",
-        enforced: true, dyno_id: @dyno.metadata_id)
-
-      # Fatal in both enforcement modes. This is not a command-policy decision an
-      # operator can be warned about; it is an attempt to change which dyno the
-      # guard believes it is running on.
-      exit DENIED
+      deny "dyno_name_spoofed",
+        "$DYNO (#{@dyno.claimed_name}) does not match this dyno's metadata",
+        "(#{@dyno.metadata_name}). Refusing to run.",
+        fatal: true,
+        command: "$DYNO=#{@dyno.claimed_name}",
+        dyno_id: @dyno.metadata_id
     end
 
     # All argument policy lives in the wrapper. If it is missing this half cannot

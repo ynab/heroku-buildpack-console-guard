@@ -137,6 +137,13 @@ class GateTest < GuardTest
     assert_includes result.stdout, "#{SENTINEL} heroku-command-exit-status: 1".b
   end
 
+  def test_a_spoofed_dyno_name_emits_it_too
+    # It refuses like any other denial, so it has to report like one: a refusal
+    # that skips the marker exits 0 and the pipeline goes green.
+    result = gate("rake db:version#{MARKER}", env: {"DYNO" => "web.1"})
+    assert_includes result.stdout, "#{SENTINEL} heroku-command-exit-status: 1".b
+  end
+
   def test_no_marker_is_invented_for_a_caller_that_never_asked
     refute_includes gate("psql").stdout, "heroku-command-exit-status"
   end
