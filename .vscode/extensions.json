@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "editorconfig.editorconfig",
+    "Shopify.ruby-lsp", // Language support for Ruby files (highlighting, go to definition)
+    "rubocop.vscode-rubocop", // Linting and formatting for Ruby files, using standard's rules
+    "timonwong.shellcheck", // The same lint CI runs over the two shell files
+    "esbenp.prettier-vscode" // Formats .json and .yaml files
+  ],
+  "unwantedRecommendations": ["rebornix.ruby", "castwide.solargraph"]
+}
