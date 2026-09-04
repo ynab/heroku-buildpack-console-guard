@@ -201,6 +201,9 @@ module ConsoleGuard
       end
     end
 
+    # A run of short flags, which Thor splits into one option per letter.
+    THOR_SHORT_BUNDLE = /\A-[a-zA-Z]{2,}\z/
+
     # `rails console --sandbox` wraps the whole session in a transaction that is
     # rolled back on exit. The audit records are enqueued through ActiveJob, and
     # a database-backed queue on the primary database (eg Solid Queue) puts that
@@ -217,6 +220,11 @@ module ConsoleGuard
     # would be modelling the parser, which is the thing the option allowlist
     # below exists to avoid; `--no-sandbox` is the spelling that opts out.
     #
+    # Thor also splits a run of short flags into separate options, so `rails c
+    # -es` is `-e -s` and the sandbox flag arrives inside a bundle. Any bundle
+    # containing `s` is refused here; the allowlist refuses bundles too, but
+    # this rule has to stand on its own for the reason above.
+    #
     # The console_audit gem sets Rails' own `config.disable_sandbox = true` when
     # auditing is active, which is a second layer over the same dynos: it holds
     # even if the command never reaches this wrapper.
@@ -224,8 +232,7 @@ module ConsoleGuard
       return unless program == "rails" && ["console", "c"].include?(subcommand)
 
       args.drop(1).each do |arg|
-        next unless arg == "--sandbox" || arg == "-s" ||
-          arg.start_with?("--sandbox=", "-s=")
+        next unless sandbox_flag?(arg)
 
         deny "sandbox_console",
           "`rails #{subcommand} #{arg}` is not permitted on one-off dynos.",
@@ -237,6 +244,13 @@ module ConsoleGuard
           "Use `rails #{subcommand}` instead. It is audited.",
           "`--no-sandbox` is permitted and means the same thing."
       end
+    end
+
+    def sandbox_flag?(arg)
+      return true if arg == "--sandbox" || arg == "-s"
+      return true if arg.start_with?("--sandbox=", "-s=")
+
+      THOR_SHORT_BUNDLE.match?(arg) && arg.include?("s")
     end
 
     # `rails runner` reading its program from a file has the same shape as
@@ -306,6 +320,11 @@ module ConsoleGuard
     #        refused rather than read as a bundle
     # value  options taking one: exactly, or with the value attached
     #        (`-T db`, `-Tdb`, `--tasks=db`)
+    # attached_values
+    #        whether a short option may carry its value in the same token.
+    #        Rake's parser takes `-Tdb`; Thor does not -- it reads a run of
+    #        letters as a bundle, so `-es` is `-e -s` and reading it as `-e s`
+    #        would wave the sandbox flag through behind an allowlisted `-e`.
     RAILS_PARSED_WHY = [
       "Options are allowlisted here, so one nobody vetted is refused",
       "rather than passed through to Rails."
@@ -315,6 +334,7 @@ module ConsoleGuard
       exact: ["--no-sandbox", "-h", "--help"],
       value: ["-e", "--environment"],
       why: RAILS_PARSED_WHY,
+      attached_values: false,
       extras: ""
     }.freeze
 
@@ -326,6 +346,7 @@ module ConsoleGuard
         "rather than passed through to Rails. The code to run is not an",
         "option and needs no entry."
       ].freeze,
+      attached_values: false,
       extras: ""
     }.freeze
 
@@ -353,6 +374,7 @@ module ConsoleGuard
         "same parser. Options naming a path are excluded for the reason a",
         "bare `-` is."
       ].freeze,
+      attached_values: true,
       extras: "task names, VAR=value assignments, and:"
     }.freeze
 
@@ -401,12 +423,9 @@ module ConsoleGuard
 
       allowed[:value].any? do |name|
         next true if token == name
+        next token.start_with?("#{name}=") if name.start_with?("--")
 
-        if name.start_with?("--")
-          token.start_with?("#{name}=")
-        else
-          token.start_with?(name) && token.bytesize > name.bytesize
-        end
+        allowed[:attached_values] && token.start_with?(name) && token.bytesize > name.bytesize
       end
     end
 

@@ -128,6 +128,17 @@ class CommandTest < GuardTest
     end
   end
 
+  def test_the_sandbox_flag_is_refused_inside_a_bundle
+    # Thor splits a run of short flags into one option per letter, so `rails c
+    # -es` is `-e -s` and the sandbox flag rides in behind an allowlisted `-e`.
+    # console1984 still refuses the session; the buildpack has to as well, or
+    # the operator gets a Rails error instead of the guard's banner.
+    ["-es", "-se", "-esw"].each do |flag|
+      assert_denied wrapper("rails", "c", flag), "unlogged"
+    end
+    assert_denied wrapper("bundle", "exec", "rails", "console", "-es"), "unlogged"
+  end
+
   def test_the_sandbox_denial_names_the_spelling_that_works
     assert_denied wrapper("rails", "c", "--sandbox=true"), "`--no-sandbox` is permitted"
   end
@@ -258,6 +269,15 @@ class CommandTest < GuardTest
     assert_ran wrapper("rails", "c", "-e", "production")
     assert_ran wrapper("rails", "console", "--environment", "production")
     assert_ran wrapper("bundle", "exec", "rails", "c", "-e", "production")
+  end
+
+  def test_the_rails_commands_take_no_attached_short_value
+    # Thor has no attached short values: `-eproduction` is a bundle of letters,
+    # not `-e production`. Reading one as a value is what let `-es` through.
+    assert_denied wrapper("rails", "c", "-eproduction"), "matched whole"
+    assert_denied wrapper("rails", "runner", "-ew", "Model.foo"), "matched whole"
+    # Rake's parser does take them, and that is not collateral damage: `-Tdb`
+    # and `-j4` are pinned above.
   end
 
   def test_options_neither_rails_command_takes_are_refused
