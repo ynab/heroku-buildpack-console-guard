@@ -190,7 +190,9 @@ task-level guard.
 
 The `runner` file check tests whether the argument **exists on disk**, which is the same decision
 Rails itself makes. There is no heuristic on how the argument looks, so
-`rails runner 'Model.where(x: 1).rb'` is permitted and `rails runner ~/script` is not.
+`rails runner 'Model.where(x: 1).rb'` is permitted and `rails runner ~/script` is not. It is
+`File.exist?`, as Rails' own is, rather than a regular-file test: `rails runner /dev/stdin` and
+`/dev/fd/0` read the program from stdin just as a bare `-` does, and are refused with it.
 
 ### Option allowlist
 

@@ -257,7 +257,7 @@ module ConsoleGuard
             "Pass the code inline instead."
         end
 
-        next unless file?(arg)
+        next unless exists?(arg)
 
         deny "runner_file",
           "`rails runner` may not read its program from a file.",
@@ -271,8 +271,8 @@ module ConsoleGuard
       end
     end
 
-    def file?(path)
-      File.file?(path)
+    def exists?(path)
+      File.exist?(path)
     rescue StandardError
       false
     end

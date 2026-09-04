@@ -154,6 +154,14 @@ class CommandTest < GuardTest
     assert_denied wrapper("rails", "r", "payload.rb"), "exists on disk"
   end
 
+  def test_a_device_or_fd_path_is_refused_too
+    # Rails checks File.exist? and then Kernel.load, and loading /dev/stdin
+    # reads the program from stdin -- the same gap the bare `-` rule closes.
+    # Neither of these is a regular file, so File.file? would let them through.
+    assert_denied wrapper("rails", "runner", "/dev/stdin"), "exists on disk"
+    assert_denied wrapper("rails", "runner", "/dev/fd/0"), "exists on disk"
+  end
+
   def test_inline_code_that_merely_looks_like_a_path_is_permitted
     assert_ran wrapper("rails", "runner", "Model.where(x: 1).rb")
     assert_ran wrapper("rails", "runner", "no_such_file.rb")
