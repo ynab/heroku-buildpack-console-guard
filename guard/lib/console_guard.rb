@@ -28,6 +28,8 @@ ENV["RUBYLIB"].to_s.split(File::PATH_SEPARATOR).each do |dir|
 end
 
 require "json"
+# rbconfig before net/http, so Ruby 3.4 works with `--disable=gems`
+require "rbconfig"
 require "net/http"
 require "uri"
 
