@@ -636,8 +636,13 @@ the interpreter hardening above. `$HOME` is the build directory, `$HOME/.profile
 
 Every bypass fixed in this repo has a regression case, and CI runs both suites inside every
 supported `heroku/heroku` stack image. The stack images carry no Ruby, so the suite installs the
-distribution's and the guard runs on that — the version spread across the matrix is what keeps the
-policy honest about using stdlib only, and what catches the C-locale encoding traps a dyno has.
+distribution's and the guard runs on that — which is what catches the C-locale encoding traps a
+dyno has.
+
+The interpreter a dyno actually uses is the app's, though, not the stack's, so CI also runs the
+policy suite against every Ruby the guard has to survive — 3.0 through 4.0, named explicitly rather
+than left to whichever version a stack image happens to ship. That spread is what keeps the policy
+honest about using stdlib only.
 
 When adding a rule, put it in `ConsoleGuard::Command` if it is about the command's **arguments** and
 in `ConsoleGuard::Gate` only if it is about the environment or the raw command string. See
