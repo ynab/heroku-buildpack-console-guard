@@ -42,18 +42,56 @@ if [[ -z "$CG_VERSION" ]]; then
 fi
 [[ -n "$CG_VERSION" ]] || CG_VERSION="unknown"
 
+# ---------- resolve the Ruby interpreter ----------
+# The guard's policy is Ruby, and the dyno must reach it by absolute path: PATH
+# is `heroku run -e`-settable, so a lookup there would let an operator hand the
+# gate its own interpreter. Resolving it is therefore this script's job, and the
+# resolved path is baked into both shell entry points.
+#
+# heroku/ruby exports its PATH for the buildpacks that run after it, so the
+# app's own interpreter is on PATH here. If it is not, this buildpack was
+# ordered before heroku/ruby, or the app has no Ruby at all -- either way there
+# is nothing to install a guard onto.
+CG_RUBY_BUILD="$(command -v ruby 2>/dev/null || true)"
+
+if [[ -z "$CG_RUBY_BUILD" ]]; then
+  {
+    echo "console-guard: no Ruby interpreter found, so the guard cannot be installed."
+    echo "               Add this buildpack after heroku/ruby."
+  } >&2
+  exit 1
+fi
+
+# The slug is built in BUILD_DIR and extracted at /app, so an interpreter
+# vendored into the slug is at a different path in the dyno than it is here. One
+# from the stack image is at the same path in both.
+case "$CG_RUBY_BUILD" in
+  "$BUILD_DIR"/*) CG_RUBY="/app${CG_RUBY_BUILD#"$BUILD_DIR"}" ;;
+  *)              CG_RUBY="$CG_RUBY_BUILD" ;;
+esac
+
 # ---------- install ----------
 
 render() {
   local src="$1" dest="$2"
   test -s "$src" || { echo "console-guard: missing source file $src" >&2; exit 1; }
+  mkdir -p "$(dirname "$dest")"
   sed -e "s|@@CG_VERSION@@|${CG_VERSION}|g" \
       -e "s|@@CG_DYNO_METADATA_FILE@@|${CG_DYNO_METADATA_FILE}|g" \
+      -e "s|@@CG_RUBY@@|${CG_RUBY}|g" \
       "$src" > "$dest"
   test -s "$dest" || { echo "console-guard: failed to write $dest" >&2; exit 1; }
   # Catch a broken substitution or an editing mistake at build time rather than
   # in a production dyno.
-  bash -n "$dest" || { echo "console-guard: $dest is not valid bash" >&2; exit 1; }
+  case "$dest" in
+    *.rb)
+      "$CG_RUBY_BUILD" -c "$dest" > /dev/null ||
+        { echo "console-guard: $dest is not valid ruby" >&2; exit 1; }
+      ;;
+    *)
+      bash -n "$dest" || { echo "console-guard: $dest is not valid bash" >&2; exit 1; }
+      ;;
+  esac
   if grep -q '@@CG_' "$dest"; then
     echo "console-guard: unsubstituted placeholder left in $dest" >&2
     exit 1
@@ -62,33 +100,54 @@ render() {
 
 echo "-----> Installing console guard ${CG_VERSION}"
 
+GUARD_DIR="$BUILD_DIR/.console-guard"
+
+# The policy, and the two entry points that run it. `render` refuses a source
+# file that is not there, so a rename fails the build here rather than reaching
+# a dyno; a file added and not listed fails the guard's own requires, which the
+# test suite runs.
+CG_POLICY_FILES=(
+  lib/console_guard.rb
+  lib/console_guard/banner.rb
+  lib/console_guard/command.rb
+  lib/console_guard/config.rb
+  lib/console_guard/denials.rb
+  lib/console_guard/dyno.rb
+  lib/console_guard/gate.rb
+  lib/console_guard/reporter.rb
+  libexec/run_gate.rb
+  libexec/run_command.rb
+)
+
+for rel in "${CG_POLICY_FILES[@]}"; do
+  render "$BUILDPACK_DIR/guard/$rel" "$GUARD_DIR/$rel"
+  chmod 644 "$GUARD_DIR/$rel"
+done
+
 # Named zzz_ so it loads last, after every other buildpack's profile script.
 # CONSOLE_AUDIT_ENABLED must be the final exported value, and the PATH entry that
 # reaches the command wrapper must not be undone by a later script.
-mkdir -p "$BUILD_DIR/.profile.d"
 render "$BUILDPACK_DIR/profile/console_guard.sh" \
        "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
 chmod 644 "$BUILD_DIR/.profile.d/zzz_console_guard.sh"
 
-# The command wrapper. Installed under all three names; it dispatches on $0. This
-# is where all argument policy lives, because it is the first point at which the
-# shell has finished expanding the operator's command.
+# The command wrapper. Installed under all three names; it dispatches on $0.
 #
 # `bundle` is one of them because Heroku's Ruby buildpack rewrites `rake <task>`
 # on a one-off dyno to `bundle exec rake <task>`, and `bundle exec` then puts
 # Bundler's own bin directory ahead of this one on PATH -- so the rails/rake
 # wrapper is never reached and policy has to be applied by the `bundle` wrapper
 # itself.
-SHIM_DIR="$BUILD_DIR/.console-guard/bin"
-mkdir -p "$SHIM_DIR"
-render "$BUILDPACK_DIR/guard/shim.sh" "$SHIM_DIR/rails"
-cp "$SHIM_DIR/rails" "$SHIM_DIR/rake"
-cp "$SHIM_DIR/rails" "$SHIM_DIR/bundle"
-chmod 755 "$SHIM_DIR/rails" "$SHIM_DIR/rake" "$SHIM_DIR/bundle"
+render "$BUILDPACK_DIR/guard/shim.sh" "$GUARD_DIR/bin/rails"
+cp "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/rake"
+cp "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/bundle"
+chmod 755 "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/rake" "$GUARD_DIR/bin/bundle"
 
 {
   echo "profile script: .profile.d/zzz_console_guard.sh"
   echo "command wrapper: .console-guard/bin/{rails,rake,bundle}"
+  echo "policy: .console-guard/{lib,libexec}/ (${#CG_POLICY_FILES[@]} ruby files)"
+  echo "ruby: ${CG_RUBY}"
   echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
   echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"
 } | indent

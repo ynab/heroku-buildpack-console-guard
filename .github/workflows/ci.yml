@@ -12,6 +12,43 @@ permissions:
   contents: read
 
 jobs:
+  ruby-lint:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          # The Ruby that runs the linter, which is not the Ruby the guard runs
+          # on -- that is the app's, and .rubocop.yml sets TargetRubyVersion to
+          # the oldest supported stack so the rules stay honest about it.
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: rubocop
+        run: bundle exec rubocop --format github
+
+      # The lint above loads the guard's files but never runs them, and it runs
+      # on one Ruby. This is the check that the sources still *parse* the way a
+      # dyno will parse them: `--disable=gems`, which is how bin/compile checks
+      # them at build time and how the guard is invoked at run time.
+      #
+      # Files are discovered rather than listed, so adding a policy file cannot
+      # silently drop it from the check.
+      - name: ruby -c --disable=gems
+        run: |
+          files=$(git ls-files '*.rb')
+
+          if [ -z "$files" ]; then
+            echo "ruby-lint: no ruby files discovered, so this job proves nothing" >&2
+            exit 1
+          fi
+
+          for f in $files; do
+            echo "checking $f"
+            ruby --disable=gems -c "$f" > /dev/null
+          done
+
   shellcheck:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:

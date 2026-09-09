@@ -10,17 +10,18 @@ needs an attributable record of who ran what, and why.
 
 ## What it does
 
-Once added to an app, the buildpack installs two things:
+Once added to an app, the buildpack installs three things:
 
 1. a `.profile.d` script that runs inside every one-off dyno, before the operator's command
 2. a wrapper for `rails`, `rake` and `bundle` on `PATH`, which the profile script makes reachable
+3. the policy both of them apply, as Ruby under `.console-guard/lib/console_guard/`
 
 Together they:
 
 * require the `CONSOLE_USER` and `CONSOLE_REASON` environment variables
 * reject compound statements and redirections, while allowing the `--exit-code` marker the Heroku CLI appends
 * permit only unqualified `rails`, `rake` and `bundle exec rails|rake` invocations, minus an
-  explicit deny list
+  explicit deny list, and allowlist the options those may be given
 * warn if [dyno metadata](https://devcenter.heroku.com/articles/dyno-metadata) is not enabled
 * export `CONSOLE_AUDIT_ENABLED=true`
 
@@ -65,14 +66,65 @@ So the profile script checks only what is sound to check on a raw string:
 | Compound statements and redirections | Presence of a character in the raw string is exactly the question |
 | `argv[0]` is literally `rails`, `rake` or `bundle` | Quoting or expanding it makes it stop matching, so it fails closed |
 
-Everything about the **arguments** lives in the command wrapper
-(`guard/shim.sh`, installed as `.console-guard/bin/{rails,rake,bundle}`), which runs after the shell has
-finished expanding and therefore sees the real `argv`. Because `argv[0]` is guaranteed to be
-literally `rails`, `rake` or `bundle`, and because the wrapper directory is prepended to `PATH`, control
-always reaches the wrapper.
+Everything about the **arguments** lives in the command wrapper (`ConsoleGuard::Command`, reached
+through `.console-guard/bin/{rails,rake,bundle}`), which runs after the shell has finished expanding
+and therefore sees the real `argv`. Because `argv[0]` is guaranteed to be literally `rails`, `rake`
+or `bundle`, and because the wrapper directory is prepended to `PATH`, control always reaches the
+wrapper.
 
-**Add argument rules to the wrapper, not to the profile script.** A rule added to the profile script
-looks like it works and is bypassable with one quote character.
+**Add argument rules to the wrapper, not to the gate.** A rule added to the gate looks like it works
+and is bypassable with one quote character.
+
+## Where the code lives
+
+The policy is Ruby. The two shell files are what is left over after that move — the things only the
+login shell itself can do, because a child process cannot reach into its parent.
+
+| File | What it is |
+|---|---|
+| `profile/console_guard.sh` | Sourced into the login shell. Runs the gate, then acts on its exit status: prepend the wrapper to `PATH`, `unset EDITOR VISUAL`, export `CONSOLE_AUDIT_ENABLED`, or `exit 1` |
+| `guard/shim.sh` | Installed as `rails`, `rake` and `bundle`. Execs the wrapper, passing the name it was invoked under — `$0` is what distinguishes the three and is lost once Ruby takes over |
+| `guard/lib/console_guard/gate.rb` | `ConsoleGuard::Gate` — the profile half's policy |
+| `guard/lib/console_guard/command.rb` | `ConsoleGuard::Command` — all argument policy |
+| `guard/lib/console_guard/reporter.rb` | The denial record, and where it goes |
+| `guard/lib/console_guard/dyno.rb` | Which dyno this is, and what therefore applies to it |
+| `guard/libexec/run_gate.rb`, `run_command.rb` | The two entry points the shell files exec |
+
+The gate reports back to the login shell through its **exit status**, because that is the only
+channel a child has to a parent that must then modify its own environment:
+
+| Status | Meaning |
+|---|---|
+| `0` | Not a dyno this applies to |
+| `10` | Audited, not gated (scheduler, release) |
+| `20` | Gated, and permitted |
+| `21` | Gated and permitted, and dry-run mode must supply the placeholder operator |
+| `1` | Denied. The banner is printed, the record sent and the `--exit-code` marker emitted already |
+
+### The guard's own interpreter
+
+Running policy in Ruby adds one attack surface that a shell script does not have: the operator can
+set `heroku run -e` variables that choose what the interpreter loads before the guard's first line
+runs. All three are closed, and the tests pin each one.
+
+| Vector | Closed by |
+|---|---|
+| `PATH` — which `ruby` | Both shell files invoke an **absolute** path, resolved at build time and baked in. Never a `PATH` lookup, and `guard/shim.sh` uses `#!/bin/bash` rather than `/usr/bin/env bash` for the same reason |
+| `RUBYOPT` — what it requires first | `--disable=rubyopt` on the interpreter's command line |
+| RubyGems, `GEM_HOME`, `GEM_PATH` | `--disable=gems`. The guard uses stdlib only, so nothing is lost |
+| `RUBYLIB` — what answers a stdlib `require` | Its entries are removed from `$LOAD_PATH` before the first `require`. The guard's own files are reached with `require_relative`, which never consults `$LOAD_PATH` |
+
+`bin/compile` resolves the interpreter once and bakes the path into both shell files. `heroku/ruby`
+exports its `PATH` for the buildpacks that run after it, so the app's own Ruby is what gets found —
+and because the slug is built in `BUILD_DIR` and extracted at `/app`, a vendored interpreter is
+re-rooted to the path the *dyno* will see. **The build fails if there is no Ruby at all**, which
+means this buildpack was ordered before `heroku/ruby`; a green build with no guard installed is the
+worst outcome available.
+
+Nothing re-resolves it at run time and no environment variable can override it. If the baked path is
+gone — the app's buildpacks were reordered, or its Ruby removed, since the last build — the profile
+script refuses every dyno that might be a one-off and warns on the rest, rather than taking a web
+dyno down over a console control.
 
 ## Command policy
 
@@ -116,8 +168,9 @@ duplicates every rule rather than delegating.
 | `rails credentials:*`, `rails encrypted:*` | Spawns `$EDITOR`, which the operator controls — a shell escape. `EDITOR` and `VISUAL` are also unset |
 | `rails runner -` (a bare `-` in any argument position) | Reads the program from **stdin**, so the executed code appears neither in the dyno command string nor in an `ARGV` capture inside the app. The session still produces a complete record with a correct user, reason and dyno UUID, while the code that ran is unrecorded |
 | `rails runner --file <f>`, or any `runner` argument that exists on disk | Same shape — the command string names a file rather than the code that runs |
+| Any argument beginning with `-` that is not on the option allowlist | See [Option allowlist](#option-allowlist) below |
 | `-c` in any argument position | Reaches a shell (`bash -c`). No legitimate `rails`/`rake` invocation uses it. `rails c` — the console shorthand — is unaffected, because that argument is `c`, not `-c` |
-| `rails console --sandbox` / `-s` (console only) | The sandbox transaction is rolled back on exit, and a database-backed ActiveJob queue on the primary database puts the audit enqueue inside it — so the rollback discards the audit trail and the session runs entirely unlogged ([console1984#91](https://github.com/basecamp/console1984/issues/91)). Scoped to `console`/`c`, because `-s` is `rake`'s silent flag; `--no-sandbox` is unaffected |
+| `rails console --sandbox` / `-s` (console only) | The sandbox transaction is rolled back on exit, and a database-backed ActiveJob queue on the primary database puts the audit enqueue inside it — so the rollback discards the audit trail and the session runs entirely unlogged ([console1984#91](https://github.com/basecamp/console1984/issues/91)). Scoped to `console`/`c`, because `-s` is `rake`'s silent flag. Thor also takes `--sandbox=<value>`, so the `=` forms are refused whatever they carry, `false` included — `--no-sandbox` is the spelling that opts out, and is unaffected. Thor splits a run of short flags into one option per letter, so `rails c -es` is `-e -s`: a bundle containing `s` is refused as `-s` is |
 
 Because these are checked after expansion, the quoted, variable and glob spellings of each are
 blocked too: `rails "dbconsole"`, `rails "credentials:edit"`, `rails runner "-"` and
@@ -137,7 +190,58 @@ task-level guard.
 
 The `runner` file check tests whether the argument **exists on disk**, which is the same decision
 Rails itself makes. There is no heuristic on how the argument looks, so
-`rails runner 'Model.where(x: 1).rb'` is permitted and `rails runner ~/script` is not.
+`rails runner 'Model.where(x: 1).rb'` is permitted and `rails runner ~/script` is not. It is
+`File.exist?`, as Rails' own is, rather than a regular-file test: `rails runner /dev/stdin` and
+`/dev/fd/0` read the program from stdin just as a bare `-` does, and are refused with it.
+
+### Option allowlist
+
+Arguments beginning with `-` are **allowlisted, not screened**. Anything not named below is
+refused.
+
+The reason is `rake -e/-p/-E CODE` (`--execute`, `--execute-print`, `--execute-continue`). Rake
+evaluates `CODE` inside its own option parser — before the Rakefile is loaded, without booting
+Rails — and then exits. Nothing the code does reaches the console audit hook, which makes it
+weaker than the `rails runner 'system("bash")'` case [below](#limitations), where Rails at least
+boots and the invocation is recorded. `rails` is affected too: it hands any command it does not
+recognise to that same parser with the whole argv, so `rails -e CODE` and `rails db:migrate -e
+CODE` reach it.
+
+A deny list would have to model which of Rake's short options take an argument, in order to know
+where a bundle such as `-Ne` or `-se` stops being flags. Get that wrong for one option — in this
+version of Rake or a later one — and the bundle hides an `-e`. An allowlist fails the other way:
+an unlisted option is refused, so being wrong costs a denial rather than an unlogged shell. It
+also refuses things nobody had to think of, such as `-g`/`--system`, which loads tasks from
+`$HOME/.rake` — `/app/.rake` on a dyno.
+
+Every command gets a list; none is exempt. `rails console` and `rails runner` parse their own
+options and never reach Rake, so `-e` there is the *environment* — but they get a list of their
+own rather than being waved through, because a mistake in a list is a denial while a mistake in
+an exemption is a silent bypass.
+
+| After | Permitted |
+|---|---|
+| `rails console` / `c` | `-e`/`--environment`, `--no-sandbox`, `-h`/`--help` |
+| `rails runner` / `r` | `-e`/`--environment`, `-w`/`--skip-executor`, `-h`/`--help` |
+| everything else (Rake's parser) | `-T`/`--tasks`, `-D`/`--describe`, `-W`/`--where`, `-P`/`--prereqs`, `-A`/`--all`, `--comments`, `--rules`, `-t`/`--trace`, `--backtrace`, `--job-stats`, `-s`/`--silent`, `-q`/`--quiet`, `-n`/`--dry-run`, `-v`/`--verbose`, `-V`/`--version`, `-m`/`--multitask`, `-j`/`--jobs`, `-B`/`--build-all`, `-X`/`--no-deprecation-warnings`, `-h`/`-H`/`--help` |
+
+Task names, task arguments (`some:task[a,b]`) and `VAR=value` assignments are not options and are
+not screened, so `rake db:rollback STEP=99` is unaffected.
+
+Two consequences worth knowing before you hit them:
+
+- **Short options are matched whole**, so `-sq` is refused where `-s -q` is permitted. This is
+  what makes `-se CODE` refusable without reasoning about bundling at all.
+- **An attached short value is Rake's alone.** `rake -Tdb` and `-j4` are permitted; after
+  `rails console` or `rails runner` they are not, because Thor has no such form — it reads
+  `-es` as `-e -s`, and reading it as `-e s` is what would let the sandbox flag through.
+- **Abbreviated long forms are refused.** Rake accepts `--task` for `--tasks`; the allowlist does
+  not. Denials list the permitted set, so this is self-service.
+
+Deliberately absent from the Rake list: `-e`/`-E`/`-p` (evaluate code), `-f`/`-r`/`-I`/`-R`/`-C`
+(name a path — the same shape as a bare `-`), and `-g`/`-G`/`-N` (change which Rakefile is found).
+Exploiting the path-naming options needs a file already in the slug, i.e. the same deploy-access
+trust boundary as the `BASH_ENV` limitation below.
 
 ### Blocked outright (non-Rails commands)
 
@@ -227,6 +331,95 @@ names the first word it rejected. An operator's screenshot is then enough to tel
 objected to the command that was typed or to something else — a wrapper, a prefix, or a shape the
 parser does not handle. Long commands are truncated at 300 characters.
 
+### Denials are recorded, not just printed
+
+That banner reaches only the operator's terminal, over the rendezvous connection. It is not in the
+app's log stream and it never reaches Datadog. Left there, the only durable trace of a blocked
+command is Heroku's own `api:dyno` record — which shows that *something* was attempted but cannot
+distinguish a guard denial from an application error, and forces the audit cross-check to read "no
+console record for this dyno" as "blocked, or lost".
+
+So each denial also POSTs one record, to the same endpoint and with the same credential as the
+companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the two apart:
+
+```json
+{
+  "event": "command_denied",
+  "enforced": true,
+  "rule": "command_not_allowed",
+  "command": "psql",
+  "operator": "becky@example.com",
+  "reason": "checking a migration",
+  "dyno_id": "b922dfe5-0ede-45c8-a267-78bff7a23481",
+  "app": "my-app",
+  "service": "my-service",
+  "guard_version": "7f1e0d8",
+  "timestamp": "2026-08-28T06:24:43.000Z"
+}
+```
+
+- **`rule`** is a short stable identifier for the check that refused — group a monitor by this rather
+  than by the denial text, which gets reworded. Current values: `dyno_name_spoofed`,
+  `wrapper_missing`, `identity_missing`, `command_unreadable`, `command_not_bash_c`,
+  `compound_statement`, `command_not_allowed`, `bundle_not_exec`, `bundle_exec_not_allowed`,
+  `raw_database_session`, `editor_escape`, `stdin_program`, `dash_c_flag`, `sandbox_console`,
+  `runner_file`, `option_not_allowed`.
+- **`enforced`** is `false` in [dry-run mode](#phased-rollout). Phase 1 exists to measure what
+  enforcement would block, and that is only measurable if the would-be denials are recorded, so they
+  are sent in both modes.
+- **`command`** is what that half of the guard judged: the pre-expansion command string from the
+  profile script, the post-expansion argv from the command wrapper. The CLI's `--exit-code` marker
+  is stripped first, so a CI denial records the command the caller wrote.
+- **`dyno_id`** comes from the dyno metadata file, not from `HEROKU_DYNO_ID`, which `-e` can set to
+  anything. It is the join key against the `api:dyno` webhook.
+- **`app`** and **`service`** are the attribution fields sent, from `HEROKU_APP_NAME` and
+  `DD_SERVICE`. The gem sends `service`/`env`/`app`/`version` but stamps them on its **worker**,
+  because `heroku run -e` can rewrite all four and a record tagged `env:staging` would keep flowing
+  to Datadog while dropping quietly out of a production-scoped monitor. There is no worker here, so
+  nothing sent from the dyno carries that guarantee — but omitting these two is worse. The
+  cross-check queries scope on `@app` to reach both log sources at once, so a denial record without
+  it is silently skipped by every one of them, and `@app_service` is the same problem one rung down:
+  the gem stamps it, so a query filtering on it would return the sessions and drop the denials beside
+  them. Sending `service` makes the attribute mean one thing on both record kinds — absent because
+  the app sets no `DD_SERVICE`, never because a denial produced the record.
+
+  The tampering argument does not transfer to either field. An operator who wants their denial record
+  gone can unset the endpoint and delete it outright, so forging them is strictly weaker than what
+  they can already do, and neither one scopes a monitor. Attribution tampering needs closing where
+  suppression is impossible, which is the gem's position and not this one.
+
+  `service` is sent under that name even though it reaches Datadog as `@app_service`. `datadog-proxy`
+  does the renaming, because Datadog's JSON preprocessing would otherwise promote a `service` key
+  onto the reserved service facet. One sender contract beats two — but it does mean the proxy needs
+  that rename deployed **before** this buildpack starts sending the field.
+- No `env` / `version`. `env` is a reserved facet that scopes monitors, which makes it the one field
+  where forging buys something suppression does not, so `datadog-proxy` infers it from the delivery
+  topology instead — nothing in the dyno can reach that. Nothing reads `version`.
+
+Every string in the record is escaped to **pure ASCII**, and any byte `>= 0x80` is replaced with
+U+FFFD. A JSON string has to be valid UTF-8, and both `command` and `reason` are operator-controlled
+bytes, so one stray byte would otherwise cost the whole record — `rule`, `operator` and `dyno_id`
+along with it — and cost it invisibly, since the only warning goes to the terminal of the operator
+who was just blocked. The price is fidelity: `rails runner "puts 'héllo'"` records two replacement
+characters where the `é` was. Enough to see that something non-ASCII was there, which is all the
+`command` field is for.
+
+The record is sent with `Net::HTTP` from stdlib. The Basic credential is lifted out of the URL's
+userinfo and set as a header, because `Net::HTTP` — unlike `curl`, which this used to shell out to —
+does not do that itself, and because `URI.parse` is stricter about what a userinfo may contain than
+whatever the proxy issued is guaranteed to be.
+
+Reporting is **fail-open and best effort**: one attempt, a 4-second ceiling, no retry, and a failure
+warns on stderr without holding up the denial. Refusing the command is the control; recording it must
+not be able to block that. A failure is reported as a status code, or as the exception's class —
+never as its message, which can quote the URL, and never as the URL, which carries the credential.
+
+It is also **not sufficient on its own.** The URL variable is inherited by the one-off dyno, so an
+operator who knows about this can suppress their own denial record with
+`heroku run -e CONSOLE_LOGGING_DATADOG_PROXY_URL=`. What survives that is the `api:dyno` webhook and
+the exit status. Closing it properly needs the record to originate somewhere the operator cannot
+reach, which a buildpack cannot be.
+
 ## Setup
 
 Add the buildpack to a Heroku app alongside its existing buildpacks, **pinned to a commit SHA**:
@@ -253,6 +446,8 @@ records the installed version:
 -----> Installing console guard 7f1e0d8
        profile script: .profile.d/zzz_console_guard.sh
        command wrapper: .console-guard/bin/{rails,rake,bundle}
+       policy: .console-guard/{lib,libexec}/ (10 ruby files)
+       ruby: /app/.heroku/ruby/bin/ruby
        dyno metadata file: /etc/heroku/dyno
        enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time
 ```
@@ -285,8 +480,8 @@ records the installed version:
 
 ## Companion gem
 
-The buildpack blocks commands and exports `CONSOLE_AUDIT_ENABLED=true`; it does not record anything
-itself. Recording console statements is done in-app by
+The buildpack blocks commands and exports `CONSOLE_AUDIT_ENABLED=true`; the only thing it records
+itself is [its own denials](#denials-are-recorded-not-just-printed). Recording console statements is done in-app by
 [console1984-datadog](https://github.com/ynab/console1984-datadog), which activates when
 `CONSOLE_AUDIT_ENABLED` is set. See that repository for what it records and how to configure it.
 
@@ -299,27 +494,27 @@ allowlisted command.
 Enforcement will break any existing `heroku run` caller that omits the required environment
 variables or uses a non-permitted command, so the buildpack supports rolling out in two phases.
 
-**Phase 1 — permit but do not block.** Set `CONSOLE_BLOCK_ENFORCE=false` as an app config var. Every
+**Phase 1 — dry run: report, but do not block.** Set `CONSOLE_BLOCK_ENFORCE=false` as an app config var. Every
 check still runs and reports on stderr, but a failure is a warning rather than an exit, and
 `CONSOLE_AUDIT_ENABLED=true` is still exported so audit records are produced throughout. Use this to
 find non-permitted commands and missing environment variables, and update the callers.
 
-In permit mode a missing `CONSOLE_USER` is replaced with the literal `[not provided]` before the
+In dry-run mode a missing `CONSOLE_USER` is replaced with the literal `[not provided]` before the
 command runs. This is not cosmetic: console1984 raises `MissingUsername` on an empty operator
 (`ask_for_username_if_empty` defaults to `false`), so without a value the console dies anyway and
-permit mode fails to permit — the one thing it exists to do. The placeholder is deliberately not a
+dry-run mode stops being a dry run — the one thing it exists to do. The placeholder is deliberately not a
 plausible username, so an audit record can never be mistaken for an identified session, and it can
 never collide with a real `heroku whoami` value. When enforcing, the session is refused instead and
 no placeholder is set.
 
 **Phase 2 — block.** Remove the config var. Enforcement is the **default**, so an app that was never
-configured fails closed. Only the exact value `false` opts into permit mode; anything else enforces.
+configured fails closed. Only the exact value `false` opts into dry-run mode; anything else enforces.
 
-`CONSOLE_BLOCK_ENFORCE` and permit mode are both **temporary**, and will be removed together once
+`CONSOLE_BLOCK_ENFORCE` and dry-run mode are both **temporary**, and will be removed together once
 enough apps have run in phase 1 to be confident no necessary production use case is blocked. Because
 of that the variable is not tamper-proof: an operator can set it per session with
-`heroku run -e CONSOLE_BLOCK_ENFORCE=false`, but only for as long as permit mode exists at all —
-and while permit mode is on, nothing blocks anyway.
+`heroku run -e CONSOLE_BLOCK_ENFORCE=false`, but only for as long as dry-run mode exists at all —
+and while dry-run mode is on, nothing blocks anyway.
 
 Before enabling enforcement anywhere, grep your CI and deploy tooling for existing `heroku run`
 callers and update them, or they break the moment the requirement is turned on.
@@ -353,14 +548,17 @@ Provided per-session via `-e`, and required for every `heroku run`:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONSOLE_USER` | Yes | Self-reported operator identity; should be the `heroku whoami` value. Whitespace-only counts as missing. Session exits if unset when enforcing; in permit mode it becomes `[not provided]` |
+| `CONSOLE_USER` | Yes | Self-reported operator identity; should be the `heroku whoami` value. Whitespace-only counts as missing. Session exits if unset when enforcing; in dry-run mode it becomes `[not provided]` |
 | `CONSOLE_REASON` | Yes | Free-text justification. Whitespace-only counts as missing. May not contain `;`. Session exits if unset |
 
 Set as a config var on the app, and read at **run** time:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONSOLE_BLOCK_ENFORCE` | No | `false` opts into phase 1 permit mode. Defaults to enforcing, and only the exact value `false` opts out. Temporary: removed at the end of phase 1, and until then not tamper-proof |
+| `CONSOLE_BLOCK_ENFORCE` | No | `false` opts into phase 1 dry-run mode. Defaults to enforcing, and only the exact value `false` opts out. Temporary: removed at the end of phase 1, and until then not tamper-proof |
+| `CONSOLE_LOGGING_DATADOG_PROXY_URL` | No | Where to POST a [denial record](#denials-are-recorded-not-just-printed). Same variable, endpoint and Basic credential as the companion gem. Unset means denials are not recorded. Read on the one-off dyno, so `-e` can suppress it |
+| `HEROKU_APP_NAME` | No | Attribution on a denial record. Set by Heroku's dyno metadata; unset means the record carries no `@app` and the cross-check queries skip it |
+| `DD_SERVICE` | No | Attribution on a denial record, forwarded as `@app_service`. The same var the companion gem stamps, so the attribute matches across both record kinds. Unset means the field is omitted |
 
 Set as a config var on the app, and read at **build** time:
 
@@ -394,28 +592,62 @@ Populated automatically by Heroku:
 | `web.N`, `worker.N`, any other process type | Not enforced | Not exported |
 | Unknown or missing dyno name | Enforced (fails closed) | Exported |
 
-Scheduler and release dynos are one-off dynos, but there is no interactive operator to supply a user
-and a reason, and their commands come from app configuration rather than from an ad-hoc invocation.
-They are audited but not gated. See [Limitations](#limitations).
+Scheduler and release dynos are one-off dynos, but nothing gates them, for two reasons. Gating asks
+"who are you and why", and nobody is there to answer — these commands run unattended, so requiring
+`CONSOLE_USER` would refuse every scheduled job on the app rather than protect anything. And the
+command is not an operator's to choose: it is whatever the app's Scheduler entry or `Procfile`
+release line says, which is changed by a deploy or a dashboard edit — a different access path, with
+its own controls, and not one a console gate is in front of.
+
+They are audited anyway, because that access path is the obvious way around this guard. A Scheduler
+entry is editable in the Heroku dashboard by anyone with app access, so `rake some:task` scheduled
+there reaches the same data a console does with no `heroku run` for the gate to see. Exporting
+`CONSOLE_AUDIT_ENABLED` is what makes a record of it exist: `console1984` only hooks the interactive
+console, but the companion gem also hooks Rails boot and logs `rake` and `rails runner` as
+`noninteractive_command` records. A rake task that does not depend on `:environment` never boots
+Rails and so is not logged — see the gem for that gap. Also see [Limitations](#limitations).
 
 ## Development
 
 ```
-./test/run_tests.sh                 # end-to-end suite, no dependencies beyond bash + coreutils
+ruby test/run_ruby_tests.rb         # policy; runs anywhere, macOS included
+./test/run_tests.sh                 # end-to-end; needs Linux (procfs) and a ruby
 shellcheck -s bash bin/* profile/*.sh guard/*.sh test/*.sh test/lib/*.sh
+ruby --disable=gems -c guard/lib/console_guard/*.rb
 ```
 
-The suite compiles the buildpack into a temporary build directory and runs payloads through a login
-shell arranged to look like a one-off dyno — `$HOME` is the build directory, `$HOME/.profile` sources
-`.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake`/`bundle` on `PATH` reports the `argv` it
-received. A test therefore distinguishes "blocked" from "ran, with exactly these arguments".
+There are two suites, split by what they can actually observe. Both compile the buildpack into a
+temporary build directory first, so they test the rendered files a dyno gets rather than the
+templates in `guard/`.
 
-Every bypass fixed in this repo has a regression case, and CI runs the suite inside the
-`heroku/heroku:22` and `heroku/heroku:24` stack images as well as on `ubuntu-latest`.
+**`test/run_ruby_tests.rb` — policy.** Which commands, arguments and options are refused, what each
+denial records, and which exit status the gate returns. It drives the two entry points as
+subprocesses with a fabricated login-shell `argv`, so it needs no procfs and no stack: it runs on a
+laptop. Subprocesses rather than in-process calls on purpose — both halves refuse by calling `exit`
+and the wrapper ends in `exec`, so testing them in process would mean adding a seam to the guard
+that exists only for the tests, and a seam is where a bypass hides.
 
-When adding a rule, put it in `guard/shim.sh` if it is about the command's **arguments** and in
-`profile/console_guard.sh` only if it is about the environment or the raw command string. See
-[How the two halves fit together](#how-the-two-halves-fit-together).
+**`test/run_tests.sh` — end to end.** Everything the *shell* does, which Ruby cannot stand in for:
+`.profile.d` being sourced, the login shell acting on the gate's exit status, the shell expanding
+the operator's command before the wrapper sees it, a permitted command reaching the real binary, and
+the interpreter hardening above. `$HOME` is the build directory, `$HOME/.profile` sources
+`.profile.d/*.sh` the way Heroku's does, and a fake `rails`/`rake`/`bundle` on `PATH` reports the
+`argv` it received — so a test distinguishes "blocked" from "ran, with exactly these arguments".
+
+Every bypass fixed in this repo has a regression case, and CI runs both suites inside every
+supported `heroku/heroku` stack image. The stack images carry no Ruby, so the suite installs the
+distribution's and the guard runs on that — which is what catches the C-locale encoding traps a
+dyno has.
+
+The interpreter a dyno actually uses is the app's, though, not the stack's, so CI also runs the
+policy suite against every Ruby the guard has to survive — 3.0 through 4.0, named explicitly rather
+than left to whichever version a stack image happens to ship. That spread is what keeps the policy
+honest about using stdlib only.
+
+When adding a rule, put it in `ConsoleGuard::Command` if it is about the command's **arguments** and
+in `ConsoleGuard::Gate` only if it is about the environment or the raw command string. See
+[How the two halves fit together](#how-the-two-halves-fit-together) and
+[Where the code lives](#where-the-code-lives).
 
 ## Limitations
 
@@ -454,6 +686,13 @@ reach models or the database.
 
 **`CONSOLE_USER` is self-reported** and is not verified by the buildpack. Heroku's own audit trail
 (`heroku access -a app_name`) is the authoritative record of who started a session.
+
+**A denial record can be suppressed by the operator it is about.** The endpoint is read from
+`CONSOLE_LOGGING_DATADOG_PROXY_URL`, which a one-off dyno inherits, so `-e` on that variable stops
+the POST. The gem does not have this problem because its *worker* reads the variable, out of the
+operator's reach; nothing running inside the dyno can borrow that defence. Suppression leaves the
+`api:dyno` webhook and the exit status, so the attempt is still visible — just not identifiable as a
+guard denial. Treat the record as evidence of what was blocked, not as proof that nothing was.
 
 **Statements executed after the audit path is disabled are not recorded.** A statement that disables
 auditing is itself recorded if the gem logs before execution, but statements after it are not.
