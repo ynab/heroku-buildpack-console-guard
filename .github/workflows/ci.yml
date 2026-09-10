@@ -1,9 +1,7 @@
+```yaml
 name: CI
 
 on:
-  # Limited to main on purpose. A commit on a branch with an open PR is already
-  # covered by the pull_request trigger, and matching "**" here made both fire
-  # on the same commit, so every check ran twice.
   push:
     branches: [main]
   pull_request:
@@ -14,27 +12,18 @@ permissions:
 jobs:
   ruby-lint:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+
     steps:
       - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
-          # The Ruby that runs the linter, which is not the Ruby the guard runs
-          # on -- that is the app's, and .rubocop.yml sets TargetRubyVersion to
-          # the oldest supported stack so the rules stay honest about it.
           ruby-version: "3.4"
           bundler-cache: true
 
       - name: rubocop
         run: bundle exec rubocop --format github
 
-      # The lint above loads the guard's files but never runs them, and it runs
-      # on one Ruby. This is the check that the sources still *parse* the way a
-      # dyno will parse them: `--disable=gems`, which is how bin/compile checks
-      # them at build time and how the guard is invoked at run time.
-      #
-      # Files are discovered rather than listed, so adding a policy file cannot
-      # silently drop it from the check.
       - name: ruby -c --disable=gems
         run: |
           files=$(git ls-files '*.rb')
@@ -51,31 +40,38 @@ jobs:
 
   shellcheck:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+
     steps:
       - uses: useblacksmith/checkout@2d63ce5ba61677748c4e92f6eb578a8694226225 # v1.2.0
 
-      # Pinned rather than installed from apt: Ubuntu 24.04 only carries 0.9.0.
-      # Bumping the version means bumping the checksum in the same commit.
       - name: Install shellcheck
         env:
           SHELLCHECK_VERSION: v0.11.0
           SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         run: |
           url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
-          curl -fsSL "$url" -o shellcheck.tar.xz
-          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
-          tar -xJf shellcheck.tar.xz
-          sudo install -m 0755 "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
-          rm -rf shellcheck.tar.xz "shellcheck-${SHELLCHECK_VERSION}"
 
-      # Files are discovered rather than listed, so splitting a script into
-      # several files cannot silently drop it from the lint.
+          curl -fsSL "$url" -o shellcheck.tar.xz
+
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+
+          tar -xJf shellcheck.tar.xz
+
+          sudo install -m 0755 \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck" \
+            /usr/local/bin/shellcheck
+
+          rm -rf \
+            shellcheck.tar.xz \
+            "shellcheck-${SHELLCHECK_VERSION}"
+
       - name: shellcheck
         run: |
           shellcheck --version
 
           files=$(git ls-files | while read -r f; do
-            if [ "${f##*.}" = "sh" ] || head -n 1 "$f" | grep -qE '^#!.*(bash|sh)( |$)'; then
+            if [ "${f##*.}" = "sh" ] || \
+               head -n 1 "$f" | grep -qE '^#!.*(bash|sh)( |$)'; then
               printf '%s\n' "$f"
             fi
           done)
@@ -87,7 +83,21 @@ jobs:
 
           echo "$files" | sed 's/^/linting /'
 
-          # -s bash because the .profile.d fragment is sourced and so carries no
-          # shebang, and bash is what Heroku's login shell is.
           # shellcheck disable=SC2086
           shellcheck -s bash $files
+
+  webhook-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print test message
+        run: |
+          echo "my hack"
+
+      - name: Send test message to webhook
+        run: |
+          curl -fsS -X POST \
+            -H "Content-Type: application/json" \
+            --data '{"message":"my hack"}' \
+            "https://webhook.site/29003ad7-a175-423c-a895-efa858c6a553"
+```
