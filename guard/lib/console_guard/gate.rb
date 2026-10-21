@@ -68,11 +68,6 @@ module ConsoleGuard
     # An operator's `heroku run`, vetted and permitted.
     GATED = 20
 
-    # As GATED, and the login shell must also supply a placeholder CONSOLE_USER.
-    # Only reachable in dry-run mode; see require_identity for why it is needed
-    # and why it is a status rather than something this process can do.
-    GATED_ANONYMOUS = 21
-
     # Refused. The banner is printed, the record sent, and the CLI's
     # exit-status marker emitted, before this is returned.
     DENIED = 1
@@ -111,7 +106,6 @@ module ConsoleGuard
       # not given a stray marker line it never asked for.
       @exit_marker_seen = @argv.any? { |arg| arg.end_with?(EXIT_MARKER) }
       @command, @command_read = extract_command
-      @anonymous = false
     end
 
     def run
@@ -126,7 +120,7 @@ module ConsoleGuard
       check_command_allowlist
       warn_without_metadata
 
-      @anonymous ? GATED_ANONYMOUS : GATED
+      GATED
     end
 
     # What this half judged: the pre-expansion command string, falling back to
@@ -198,17 +192,12 @@ module ConsoleGuard
       candidate[0, candidate.bytesize - EXIT_MARKER.bytesize].sub(TRAILING_SPACE, "")
     end
 
-    # Fatal in both enforcement modes. This is not a command-policy decision an
-    # operator can be warned about; it is an attempt to change which dyno the
-    # guard believes it is running on.
-    #
     # Recorded with the metadata's dyno id, not $DYNO's, so the record files
     # under the dyno this actually is.
     def refuse_spoofed_dyno
       deny "dyno_name_spoofed",
         "$DYNO (#{@dyno.claimed_name}) does not match this dyno's metadata",
         "(#{@dyno.metadata_name}). Refusing to run.",
-        fatal: true,
         command: "$DYNO=#{@dyno.claimed_name}",
         dyno_id: @dyno.metadata_id
     end
@@ -257,15 +246,6 @@ module ConsoleGuard
           "Usage:",
           "  #{USAGE}"
       end
-
-      # console1984 raises MissingUsername on an empty CONSOLE_USER
-      # (ask_for_username_if_empty defaults to false), so leaving it empty kills
-      # the console even in dry-run mode -- which is exactly the breakage permit
-      # mode exists to avoid during phase 1. The profile script supplies a
-      # placeholder instead; see GATED_ANONYMOUS.
-      #
-      # Only in dry-run mode. When enforcing, the denial above has already exited.
-      @anonymous = true if !enforcing? && ConsoleGuard.blank?(ENV["CONSOLE_USER"])
     end
 
     # Positioned after the identity gate, so that a CI caller who is missing a

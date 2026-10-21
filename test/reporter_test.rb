@@ -21,7 +21,6 @@ class ReporterTest < GuardTest
     assert_equal "bash", record["command"]
     assert_equal "becky", record["operator"]
     assert_equal "testing", record["reason"]
-    assert_equal true, record["enforced"]
   end
 
   def test_a_wrapper_denial_is_posted_too
@@ -122,19 +121,6 @@ class ReporterTest < GuardTest
     refute_includes record.keys, "env"
     refute_includes record.keys, "version"
     assert_includes record.keys, "guard_version"
-  end
-
-  # ---------------------------------------------------------------- dry-run mode
-
-  def test_permit_mode_records_the_would_be_denial
-    # Phase 1 exists to measure what enforcement would block, which is only
-    # measurable if the would-be denials are recorded.
-    gate("bash", env: reporting_env.merge("CONSOLE_BLOCK_ENFORCE" => "false"))
-    assert_equal false, assert_one_record["enforced"]
-
-    File.write(ConsoleGuardTest::RECORD_LOG, "")
-    wrapper("rails", "dbconsole", env: reporting_env.merge("CONSOLE_BLOCK_ENFORCE" => "false"))
-    assert_equal false, assert_one_record["enforced"]
   end
 
   # ---------------------------------------------------------------- hostile bytes

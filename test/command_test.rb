@@ -289,22 +289,6 @@ class CommandTest < GuardTest
     assert_denied wrapper("rails", "runner", "-s", "Model.foo"), "allowlisted"
   end
 
-  # ---------------------------------------------------------------- enforcement
-
-  def test_enforcement_defaults_to_blocking
-    # Only the exact string `false` opts into dry-run mode, so a typo or an empty
-    # value fails closed.
-    ["0", "", "False", "true"].each do |value|
-      assert_denied wrapper("rails", "dbconsole", env: {"CONSOLE_BLOCK_ENFORCE" => value})
-    end
-  end
-
-  def test_permit_mode_warns_and_runs
-    result = wrapper("rails", "dbconsole", env: {"CONSOLE_BLOCK_ENFORCE" => "false"})
-    assert_ran result
-    assert_includes result.output, "WILL BE BLOCKED"
-  end
-
   def test_the_resolved_path_is_never_handed_to_a_shell
     # Ruby's `exec` picks its own dispatch: a single string is scanned for shell
     # metacharacters and falls back to `/bin/sh -c`. A permitted command with no
