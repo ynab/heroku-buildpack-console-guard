@@ -12,7 +12,7 @@
 #
 #   * bin/compile produces a slug that works
 #   * .profile.d is sourced, and the login shell acts on the gate's exit status
-#     -- PATH, EDITOR/VISUAL, CONSOLE_AUDIT_ENABLED, CONSOLE_USER, exiting
+#     -- PATH, EDITOR/VISUAL, CONSOLE_AUDIT_ENABLED, exiting
 #   * the shell expands the operator's command before the wrapper sees it, which
 #     is the entire reason the guard is in two halves
 #   * a permitted command reaches the real binary through the wrapper
@@ -49,6 +49,9 @@ assert_blocked 'psql'             'not permitted'
 assert_blocked 'rails dbconsole'  'raw database session'
 assert_blocked 'rake -e 1'        'allowlisted'
 cg_env 'CONSOLE_USER=' ; assert_blocked 'rails c' 'CONSOLE_USER is not set'
+# A former opt-out, still settable per session with `heroku run -e`.
+cg_env 'CONSOLE_BLOCK_ENFORCE=false' ; assert_blocked 'psql'            'not permitted'
+cg_env 'CONSOLE_BLOCK_ENFORCE=false' ; assert_blocked 'rails dbconsole' 'raw database session'
 
 cg_section "the shell expands the command before the wrapper sees it"
 # The reason the guard is in two halves. The profile script sees a string, and
@@ -199,24 +202,6 @@ cg_write_metadata '{"dyno":{"id":"de7c25da-uuid","name":"run.1234"},"app":{"id":
 assert_ran 'rails c'
 # The operator claims to be on a web dyno to skip the gate; the file disagrees.
 cg_env 'DYNO=web.1' ; assert_blocked 'rails c' 'does not match this dyno'
-
-# ============================================================ dry-run mode
-cg_section "phase 1: dry-run mode hands the app an operator"
-cg_build permit CONSOLE_GUARD_DYNO_METADATA_FILE="$CG_TMP_ROOT/permit/dyno-metadata.json"
-cg_env_sticky 'CONSOLE_BLOCK_ENFORCE=false'
-assert_output 'the audit hook is still activated' 'rails c' 'AUDIT=true'
-assert_output 'a would-be denial warns and permits' 'psql' 'WILL BE BLOCKED'
-# An empty CONSOLE_USER is not enough to be non-blocking: console1984 raises
-# MissingUsername on one, so the console dies anyway and dry-run mode fails to
-# permit. The app gets a placeholder instead -- obviously not a real username, so
-# an audit record cannot be mistaken for an identified session. Only the login
-# shell can export it, which is why it has an exit status of its own.
-cg_env 'CONSOLE_USER=' ; assert_output 'dry-run mode supplies a placeholder operator' \
-  'rails c' 'USER=[not provided]'
-cg_env 'CONSOLE_USER=   ' ; assert_output 'whitespace-only counts as absent here too' \
-  'rails c' 'USER=[not provided]'
-assert_output 'a real CONSOLE_USER is left alone' 'rails c' 'USER=becky'
-cg_env_sticky
 
 # ============================================================ denial records
 cg_section "denials are recorded through the whole chain"

@@ -149,7 +149,6 @@ chmod 755 "$GUARD_DIR/bin/rails" "$GUARD_DIR/bin/rake" "$GUARD_DIR/bin/bundle"
   echo "policy: .console-guard/{lib,libexec}/ (${#CG_POLICY_FILES[@]} ruby files)"
   echo "ruby: ${CG_RUBY}"
   echo "dyno metadata file: ${CG_DYNO_METADATA_FILE}"
-  echo "enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time"
 } | indent
 
 echo "       Done."

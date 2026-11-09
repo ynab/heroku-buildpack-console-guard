@@ -74,24 +74,20 @@ module ConsoleGuard
     # rule      short stable identifier for the check that refused -- the field to
     #           group a monitor by, because denial *messages* get reworded
     # command   what the guard was judging, as the banner shows it
-    # enforced  Sent in dry-run mode as well: phase 1 exists to measure what
-    #           enforcement would block, which is only measurable if the would-be
-    #           denials are recorded.
     # dyno_id   the join key against the api:dyno webhook
-    def self.report(rule:, command:, enforced:, dyno_id:)
+    def self.report(rule:, command:, dyno_id:)
       url = ENV[URL_VAR].to_s
       # Nothing configured: an app that has not been given the endpoint is not
       # one this can report for. Silent, because it is also the state of every
       # app before rollout reaches it.
       return if url.empty?
 
-      post(url, body(rule: rule, command: command, enforced: enforced, dyno_id: dyno_id))
+      post(url, body(rule: rule, command: command, dyno_id: dyno_id))
     end
 
-    def self.body(rule:, command:, enforced:, dyno_id:)
+    def self.body(rule:, command:, dyno_id:)
       fields = {
         "event" => EVENT,
-        "enforced" => enforced,
         "rule" => ascii(rule.to_s.empty? ? "unknown" : rule),
         "command" => ascii(truncate(command)),
         "operator" => ascii(ENV["CONSOLE_USER"]),

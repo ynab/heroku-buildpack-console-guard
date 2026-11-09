@@ -98,7 +98,6 @@ channel a child has to a parent that must then modify its own environment:
 | `0` | Not a dyno this applies to |
 | `10` | Audited, not gated (scheduler, release) |
 | `20` | Gated, and permitted |
-| `21` | Gated and permitted, and dry-run mode must supply the placeholder operator |
 | `1` | Denied. The banner is printed, the record sent and the `--exit-code` marker emitted already |
 
 ### The guard's own interpreter
@@ -345,7 +344,6 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
 ```json
 {
   "event": "command_denied",
-  "enforced": true,
   "rule": "command_not_allowed",
   "command": "psql",
   "operator": "becky@example.com",
@@ -364,9 +362,6 @@ companion gem — `CONSOLE_LOGGING_DATADOG_PROXY_URL`. `event` is what tells the
   `compound_statement`, `command_not_allowed`, `bundle_not_exec`, `bundle_exec_not_allowed`,
   `raw_database_session`, `editor_escape`, `stdin_program`, `dash_c_flag`, `sandbox_console`,
   `runner_file`, `option_not_allowed`.
-- **`enforced`** is `false` in [dry-run mode](#phased-rollout). Phase 1 exists to measure what
-  enforcement would block, and that is only measurable if the would-be denials are recorded, so they
-  are sent in both modes.
 - **`command`** is what that half of the guard judged: the pre-expansion command string from the
   profile script, the post-expansion argv from the command wrapper. The CLI's `--exit-code` marker
   is stripped first, so a CI denial records the command the caller wrote.
@@ -449,8 +444,11 @@ records the installed version:
        policy: .console-guard/{lib,libexec}/ (10 ruby files)
        ruby: /app/.heroku/ruby/bin/ruby
        dyno metadata file: /etc/heroku/dyno
-       enforcement: blocking unless CONSOLE_BLOCK_ENFORCE=false at run time
 ```
+
+Before adding it to an app, grep your CI and deploy tooling for existing `heroku run` callers and
+update them to set [`CONSOLE_USER` and `CONSOLE_REASON`](#setting-console_user-and-console_reason)
+and use only permitted commands, or they break on the first deploy that installs the guard.
 
 ### Also recommended on the app
 
@@ -489,36 +487,6 @@ The two are independent: an app with the buildpack and no gem blocks commands an
 app with the gem and no buildpack logs statements but does not require a user, a reason, or an
 allowlisted command.
 
-## Phased rollout
-
-Enforcement will break any existing `heroku run` caller that omits the required environment
-variables or uses a non-permitted command, so the buildpack supports rolling out in two phases.
-
-**Phase 1 — dry run: report, but do not block.** Set `CONSOLE_BLOCK_ENFORCE=false` as an app config var. Every
-check still runs and reports on stderr, but a failure is a warning rather than an exit, and
-`CONSOLE_AUDIT_ENABLED=true` is still exported so audit records are produced throughout. Use this to
-find non-permitted commands and missing environment variables, and update the callers.
-
-In dry-run mode a missing `CONSOLE_USER` is replaced with the literal `[not provided]` before the
-command runs. This is not cosmetic: console1984 raises `MissingUsername` on an empty operator
-(`ask_for_username_if_empty` defaults to `false`), so without a value the console dies anyway and
-dry-run mode stops being a dry run — the one thing it exists to do. The placeholder is deliberately not a
-plausible username, so an audit record can never be mistaken for an identified session, and it can
-never collide with a real `heroku whoami` value. When enforcing, the session is refused instead and
-no placeholder is set.
-
-**Phase 2 — block.** Remove the config var. Enforcement is the **default**, so an app that was never
-configured fails closed. Only the exact value `false` opts into dry-run mode; anything else enforces.
-
-`CONSOLE_BLOCK_ENFORCE` and dry-run mode are both **temporary**, and will be removed together once
-enough apps have run in phase 1 to be confident no necessary production use case is blocked. Because
-of that the variable is not tamper-proof: an operator can set it per session with
-`heroku run -e CONSOLE_BLOCK_ENFORCE=false`, but only for as long as dry-run mode exists at all —
-and while dry-run mode is on, nothing blocks anyway.
-
-Before enabling enforcement anywhere, grep your CI and deploy tooling for existing `heroku run`
-callers and update them, or they break the moment the requirement is turned on.
-
 ## Setting `CONSOLE_USER` and `CONSOLE_REASON`
 
 Every caller of `heroku run` — human and automated — must set both. `CONSOLE_USER` should be the
@@ -548,14 +516,13 @@ Provided per-session via `-e`, and required for every `heroku run`:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONSOLE_USER` | Yes | Self-reported operator identity; should be the `heroku whoami` value. Whitespace-only counts as missing. Session exits if unset when enforcing; in dry-run mode it becomes `[not provided]` |
+| `CONSOLE_USER` | Yes | Self-reported operator identity; should be the `heroku whoami` value. Whitespace-only counts as missing. Session exits if unset |
 | `CONSOLE_REASON` | Yes | Free-text justification. Whitespace-only counts as missing. May not contain `;`. Session exits if unset |
 
 Set as a config var on the app, and read at **run** time:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONSOLE_BLOCK_ENFORCE` | No | `false` opts into phase 1 dry-run mode. Defaults to enforcing, and only the exact value `false` opts out. Temporary: removed at the end of phase 1, and until then not tamper-proof |
 | `CONSOLE_LOGGING_DATADOG_PROXY_URL` | No | Where to POST a [denial record](#denials-are-recorded-not-just-printed). Same variable, endpoint and Basic credential as the companion gem. Unset means denials are not recorded. Read on the one-off dyno, so `-e` can suppress it |
 | `HEROKU_APP_NAME` | No | Attribution on a denial record. Set by Heroku's dyno metadata; unset means the record carries no `@app` and the cross-check queries skip it |
 | `DD_SERVICE` | No | Attribution on a denial record, forwarded as `@app_service`. The same var the companion gem stamps, so the attribute matches across both record kinds. Unset means the field is omitted |
@@ -571,7 +538,7 @@ Set by the buildpack itself:
 
 | Variable | Value | Notes |
 |---|---|---|
-| `CONSOLE_AUDIT_ENABLED` | `true` | Exported on `run`, `scheduler` and `release` dynos, in both enforcement modes. Activates the audit hook in the companion gem. Because `.profile.d` scripts run *after* config vars and `-e` vars are applied, an operator cannot disable it via `-e`. In local and development environments, where this buildpack does not run, set it manually to opt in |
+| `CONSOLE_AUDIT_ENABLED` | `true` | Exported on `run`, `scheduler` and `release` dynos. Activates the audit hook in the companion gem. Because `.profile.d` scripts run *after* config vars and `-e` vars are applied, an operator cannot disable it via `-e`. In local and development environments, where this buildpack does not run, set it manually to opt in |
 | `PATH` | prepended | With `.console-guard/bin`, so `rails`, `rake` and `bundle` resolve to the command wrapper |
 | `EDITOR`, `VISUAL` | unset | They are a shell escape via `rails credentials:edit` |
 

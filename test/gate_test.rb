@@ -13,7 +13,6 @@ class GateTest < GuardTest
   DENIED = 1
   AUDITED = 10
   GATED = 20
-  GATED_ANONYMOUS = 21
 
   def test_a_permitted_command_gates_the_dyno
     assert_equal GATED, gate("rails c").status
@@ -223,13 +222,6 @@ class GateTest < GuardTest
     assert_denied gate("bash", env: {"DYNO" => "run.9999"}), "does not match this dyno"
   end
 
-  def test_a_spoofed_dyno_name_is_fatal_in_permit_mode_too
-    # Not a command-policy decision an operator can be warned about; it is an
-    # attempt to change which dyno the guard believes it is running on.
-    assert_denied gate("bash", env: {"DYNO" => "web.1", "CONSOLE_BLOCK_ENFORCE" => "false"}),
-      "does not match this dyno"
-  end
-
   def test_the_dyno_object_is_addressed_rather_than_searched
     # The real file carries three objects, each with its own name and id, and
     # app.name is empty. A greedy parser reads that instead of dyno.name and
@@ -249,34 +241,5 @@ class GateTest < GuardTest
 
   def test_no_warning_when_metadata_is_present
     refute_includes gate("rails c").output, "dyno metadata is not enabled"
-  end
-
-  # ---------------------------------------------------------------- dry-run mode
-
-  def test_permit_mode_warns_and_permits
-    result = gate("bash", env: {"CONSOLE_BLOCK_ENFORCE" => "false"})
-    assert_equal GATED, result.status
-    assert_includes result.output, "WILL BE BLOCKED"
-  end
-
-  def test_permit_mode_asks_for_a_placeholder_operator
-    # console1984 raises MissingUsername on an empty CONSOLE_USER, so leaving it
-    # empty kills the console even in dry-run mode -- exactly the breakage permit
-    # mode exists to avoid. The distinct status is how the login shell is told.
-    result = gate("rails c", env: {"CONSOLE_USER" => "", "CONSOLE_BLOCK_ENFORCE" => "false"})
-    assert_equal GATED_ANONYMOUS, result.status
-
-    whitespace = gate("rails c", env: {"CONSOLE_USER" => "   ", "CONSOLE_BLOCK_ENFORCE" => "false"})
-    assert_equal GATED_ANONYMOUS, whitespace.status
-  end
-
-  def test_a_supplied_identity_needs_no_placeholder
-    assert_equal GATED, gate("rails c", env: {"CONSOLE_BLOCK_ENFORCE" => "false"}).status
-  end
-
-  def test_enforcement_defaults_to_blocking
-    ["0", "", "False", "true"].each do |value|
-      assert_denied gate("bash", env: {"CONSOLE_BLOCK_ENFORCE" => value})
-    end
   end
 end

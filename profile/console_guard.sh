@@ -14,7 +14,7 @@
 #     child looking up its own PID would find the gate's argv instead
 #   - exit, which is how a denial refuses the session
 #   - prepend the command wrapper to PATH, so `rails` and `rake` reach it
-#   - unset EDITOR/VISUAL, and export CONSOLE_AUDIT_ENABLED and CONSOLE_USER
+#   - unset EDITOR/VISUAL, and export CONSOLE_AUDIT_ENABLED
 #
 # Adding a rule means editing the Ruby, not this file.
 #
@@ -36,8 +36,6 @@
 #   10  audited, not gated. See ConsoleGuard::Gate for why the distinction
 #       exists and which dynos land here.
 #   20  gated and audited. An operator's `heroku run`, and it passed.
-#   21  as 20, and dry-run mode needs CONSOLE_USER supplied. This shell script
-#       will set a placeholder value.
 #
 # Any other status is a gate that died rather than decided, and is treated as a
 # denial. The case where the gate cannot be started at all is handled before it
@@ -96,7 +94,7 @@ case "$_cg_status" in
     # refuse nothing.
     export CONSOLE_AUDIT_ENABLED=true
     ;;
-  20 | 21)
+  20)
     # Prepended, so `rails` and `rake` resolve to the wrapper, which re-resolves
     # the real binary from the rest of PATH.
     export PATH="$_cg_root/bin:$PATH"
@@ -108,17 +106,8 @@ case "$_cg_status" in
 
     # Exported after the gate: .profile.d runs after config vars and
     # `heroku run -e` vars are applied, so this overrides any operator-supplied
-    # value. It is exported in dry-run mode too, so that phase 1 still produces
-    # console audit records.
+    # value.
     export CONSOLE_AUDIT_ENABLED=true
-
-    if [[ "$_cg_status" == 21 ]]; then
-      # Dry-run mode with no CONSOLE_USER. console1984 raises MissingUsername on
-      # an empty one, so the console would die anyway and dry-run mode would stop
-      # being a dry run. Deliberately not a plausible username: it has to be
-      # obvious in an audit record that nobody identified themselves.
-      export CONSOLE_USER="[not provided]"
-    fi
     ;;
   *)
     # A denial. The gate has already printed the banner, recorded the denial and

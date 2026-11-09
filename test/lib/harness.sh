@@ -41,7 +41,6 @@ CG_TMP_ROOT="$(mktemp -d)"
 CG_TESTS_RUN=0
 CG_TESTS_FAILED=0
 CG_CURRENT_ENV=""
-CG_STICKY_ENV=""
 
 cg_cleanup() {
   [[ -n "${CG_RECORDER_PID:-}" ]] && kill "$CG_RECORDER_PID" 2> /dev/null
@@ -109,7 +108,6 @@ cg_build() {
 echo "RAN ${fake} \$*"
 echo "EDITOR=\${EDITOR-unset}"
 echo "AUDIT=\${CONSOLE_AUDIT_ENABLED-unset}"
-echo "USER=\${CONSOLE_USER-unset}"
 EOF
     chmod 755 "$base/fakebin/$fake"
   done
@@ -163,11 +161,6 @@ cg_metadata_path() { echo "$(dirname "$CG_APP")/dyno-metadata.json"; }
 # would supply it (per-session, after config vars).
 cg_env() { CG_CURRENT_ENV="$*"; }
 
-# cg_env_sticky VAR=value ... -- environment for every subsequent cg_run, until
-# called again with no arguments. Applied before cg_env's one-shot values, so a
-# single test can still override.
-cg_env_sticky() { CG_STICKY_ENV="$*"; }
-
 # cg_run <payload> -- runs the payload as the dyno command. Sets CG_OUT/CG_STATUS.
 cg_run() {
   local payload="$1"
@@ -179,8 +172,6 @@ cg_run() {
     "CONSOLE_REASON=testing"
   )
   # shellcheck disable=SC2206  # deliberate word splitting of the caller's list
-  [[ -n "$CG_STICKY_ENV" ]] && env_args+=($CG_STICKY_ENV)
-  # shellcheck disable=SC2206
   [[ -n "$CG_CURRENT_ENV" ]] && env_args+=($CG_CURRENT_ENV)
 
   # BASH_ENV, not login-profile discovery: `--noprofile` keeps the host's
